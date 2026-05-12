@@ -69,6 +69,11 @@ class Config:
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
     WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
     TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
+    # --- Attachments ---
+    # Directory where uploaded attachments are stored (development)
+    ATTACHMENTS_DIR = _get_val("ATTACHMENTS_DIR", str(PROJECT_ROOT / "attachments"))
+    # Use randomized filenames to avoid collisions and leaking original names
+    ATTACHMENTS_RANDOMIZE_FILENAMES = _get_bool_env("ATTACHMENTS_RANDOMIZE_FILENAMES", True)
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
@@ -115,12 +120,23 @@ class Config:
 
     # --- Notification Settings (SMS) ---
     TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
-    TWILIO_AUTH_TOKEN = _get_val("TWILIO_AUTH_TOKEN", "")
     TWILIO_FROM_NUMBER = _get_val("TWILIO_FROM_NUMBER", "")
-    
+
+    @classmethod
+    def get_twilio_auth_token(cls) -> str:
+        """Return the Twilio auth token, retrieved on demand to limit exposure."""
+        return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+
     # --- Notification Settings (Email) ---
-    SENDGRID_API_KEY = _get_val("SENDGRID_API_KEY", "")
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
+
+    @classmethod
+    def get_sendgrid_api_key(cls) -> str:
+        """Return the SendGrid API key, retrieved on demand to limit exposure."""
+        return str(_get_val("SENDGRID_API_KEY", "") or "")
+
+    # --- Application URLs ---
+    BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 
     @classmethod
     def is_development(cls):

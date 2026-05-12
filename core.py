@@ -1,3 +1,4 @@
+import io
 from pypdf import PdfReader
 import pdfplumber
 import re
@@ -129,9 +130,21 @@ def extract_text_with_diagnostics(
         "confidence": None,
     }
 
-    # 1. Try pdfplumber (more robust for complex layouts)
+    # 1. Try pdfplumber (more robust for complex layouts).
+    # For file-like objects (e.g. Streamlit UploadedFile), read bytes and wrap
+    # in io.BytesIO first to guarantee a seekable stream, since not all upload
+    # implementations expose the full file-object interface that pdfplumber
+    # expects.  Path/str inputs are passed directly.
     try:
-        with pdfplumber.open(pdf_input) as pdf:
+        if isinstance(pdf_input, (str, Path)):
+            pdfplumber_input = pdf_input
+        else:
+            raw_bytes = _read_pdf_bytes(pdf_input)
+            if raw_bytes is None:
+                raise ValueError("Could not read bytes from the provided PDF input.")
+            pdfplumber_input = io.BytesIO(raw_bytes)
+
+        with pdfplumber.open(pdfplumber_input) as pdf:
             pages_text = []
             for page in pdf.pages:
                 page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
@@ -143,7 +156,7 @@ def extract_text_with_diagnostics(
                 LOGGER.info("Extracted text using pdfplumber.")
                 return diagnostics
     except Exception as e:
-        LOGGER.warning(f"pdfplumber extraction failed or not available: {e}. Falling back to pypdf.")
+        LOGGER.warning(f"pdfplumber extraction failed: {e}. Falling back to pypdf.")
 
     # 2. Fallback to pypdf
     try:
@@ -439,9 +452,10 @@ def _validate_court_name(value: Optional[str]) -> Optional[str]:
     normalized = cleaned.lower()
     if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
         return cleaned
-    
-    # NEW: Log as warning and return None if not a known court
-    return None
+
+    # For non-English or unrecognized court names, preserve the original value
+    # rather than discarding it — trust the LLM output for unknown courts.
+    return cleaned
 
 def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[str]]]:
     """
@@ -525,7 +539,7 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         normalized = _validate_court_name(orig)
         if normalized is None:
             LOGGER.warning("parse_remedies_response: unknown appeal_court: %s", orig)
-        remedies["appeal_court"] = normalized or ""
+        remedies["appeal_court"] = normalized or orig
     
     # Map 'cost_estimate' to 'cost' for app.py
     if remedies["cost_estimate"]:

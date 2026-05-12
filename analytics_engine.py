@@ -2,8 +2,10 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
 import hashlib
+import hmac
+import os
 from collections import Counter
 import logging
 
@@ -65,10 +67,18 @@ class CaseSimilarityCalculator:
         min_similarity: float = 50.0,
         limit: int = 50,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find cases similar to reference case using initial DB-side filtering"""
-        # Reduce memory load by pre-filtering on common attributes
+        """Find cases similar to reference case using initial DB-side filtering.
+
+        Fix: Exclusion filter now correctly references CaseRecord.id (the actual
+        primary key column) instead of the non-existent CaseRecord.case_id field.
+        Previously, the wrong field reference caused the reference case to remain
+        in similarity results, producing self-matching records.
+        """
+        # Reduce memory load by pre-filtering on common attributes.
+        # FIX: Use CaseRecord.id (primary key) — not case_id — to reliably
+        # exclude the reference case from results.
         query = db.query(CaseRecord).filter(
-            CaseRecord.case_id != reference_case.case_id,
+            CaseRecord.id != reference_case.id,  # corrected from case_id
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
@@ -84,6 +94,32 @@ class CaseSimilarityCalculator:
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:limit]
 
+    @staticmethod
+    def get_feedback_adjustment(
+        db: Session,
+        candidate_case: CaseRecord,
+        user_id: Optional[str] = None,
+        query_signature: Optional[str] = None,
+    ) -> float:
+        """Return a small ranking adjustment from historical similarity feedback."""
+        query = db.query(SimilarityFeedback).filter(
+            SimilarityFeedback.candidate_case_id == candidate_case.id,
+        )
+
+        if user_id is not None:
+            query = query.filter(SimilarityFeedback.user_id == str(user_id))
+        if query_signature is not None:
+            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+
+        feedback_rows = query.limit(50).all()
+        if not feedback_rows:
+            return 0.0
+
+        positive_count = sum(1 for row in feedback_rows if row.relevance)
+        negative_count = len(feedback_rows) - positive_count
+        raw_delta = (positive_count - negative_count) / max(len(feedback_rows), 1)
+        return max(-0.03, min(0.03, raw_delta * 0.03))
+
 
 class AnalyticsCalculator:
     """Calculate various analytics metrics using SQL aggregates"""
@@ -98,7 +134,7 @@ class AnalyticsCalculator:
         """Calculate judge-specific statistics using aggregates"""
         stats = db.query(
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike(winning_outcome), 1), else_=0)).label('wins'),
+            func.sum(sql_case((CaseRecord.outcome == winning_outcome, 1), else_=0)).label('wins'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -222,6 +258,29 @@ class AnalyticsCalculator:
             return 0.0
             
         return (successful_appeals / total_appeals) * 100
+
+
+    @staticmethod
+    def calculate_appeal_success_rate(cases: list) -> float:
+        """
+        Calculate the aggregate appeal success rate from a list of CaseRecord objects.
+        Cases without outcome_data or with appeal_filed=False are safely ignored.
+        Returns a percentage (0.0–100.0), or 0.0 if no qualifying cases.
+        """
+        appeals_filed = 0
+        appeals_won = 0
+        for case in cases:
+            outcome_data = getattr(case, "outcome_data", None)
+            if outcome_data is None:
+                continue
+            if not getattr(outcome_data, "appeal_filed", False):
+                continue
+            appeals_filed += 1
+            if getattr(outcome_data, "appeal_success", False):
+                appeals_won += 1
+        if appeals_filed == 0:
+            return 0.0
+        return round((appeals_won / appeals_filed) * 100, 1)
 
 
 class AppealProbabilityEstimator:
@@ -424,5 +483,28 @@ class AnalyticsAggregator:
 
 # Utility function to anonymize case ID
 def generate_anonymous_case_id(case_data: str) -> str:
-    """Generate anonymous case ID from case data"""
-    return hashlib.sha256(case_data.encode()).hexdigest()[:16]
+    """Generate an anonymous case ID from case data using HMAC-SHA256.
+
+    Raw SHA-256 without a secret key is deterministic and vulnerable to
+    precomputation and correlation attacks.  HMAC-SHA256 binds the output
+    to a server-side secret so identical inputs produce unpredictable
+    identifiers across environments.
+
+    The secret is read from the CASE_ANONYMIZATION_SECRET environment
+    variable (same source used by case_manager._get_case_anonymization_secret).
+    Raises RuntimeError if the secret is not configured, consistent with the
+    project-wide policy of failing loudly rather than silently degrading
+    anonymization strength.
+    """
+    secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError(
+            "CASE_ANONYMIZATION_SECRET is not configured. "
+            "Set this environment variable to a strong random value before "
+            "generating anonymous case identifiers."
+        )
+    return hmac.new(
+        secret.encode("utf-8"),
+        case_data.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:16]

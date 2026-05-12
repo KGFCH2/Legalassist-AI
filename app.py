@@ -2,6 +2,7 @@ import streamlit as st
 import openai
 from openai import OpenAI
 from pypdf import PdfReader
+import hashlib
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from core.app_utils import (
     _initialize_openai_client,
     extract_text_from_pdf,
     compress_text,
-    english_leakage_detected,
+    english_leakage_detected,  # Used to detect if output contains English in non-English text
     output_language_mismatch_detected,
     build_prompt,
     build_summary_prompt,
@@ -43,6 +44,12 @@ from config import Config
 init_db()
 
 # ==================== Logging Setup ====================
+# CENTRALIZED LOGGING CONFIGURATION
+# This is the single, authoritative logging setup point for the entire application.
+# All modules (scheduler, database, auth, etc.) use logging.getLogger(__name__)
+# and get their logs handled by this configuration.
+# NOTE: Other modules (scheduler.py, etc.) are imported BEFORE this point,
+# but they do NOT call logging.basicConfig() to avoid duplicate handlers.
 logging.basicConfig(
     level=Config.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -61,6 +68,11 @@ st.set_page_config(
 MAX_FILE_SIZE_MB = Config.MAX_FILE_SIZE_MB
 
 LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
+
+
+def get_uploaded_file_hash(uploaded_file):
+    """Return a stable SHA256 hash for the uploaded file contents."""
+    return hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
 
 
 @st.cache_data(show_spinner=False)
@@ -150,49 +162,48 @@ def render_remedies_section(remedies):
     st.markdown("---")
     st.markdown("## ⚖️ What Can You Do Now?")
     
-    with st.spinner("Analyzing your legal options..."):
-        try:
-            # Show warning if data is partial
-            if remedies.get("_is_partial"):
-                st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
+    try:
+        # Show warning if data is partial
+        if remedies.get("_is_partial"):
+            st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
+        
+        # Show each answer with clean layout
+        if remedies.get("what_happened"):
+            st.markdown("### 📝 What Happened?")
+            st.info(remedies["what_happened"])
+        
+        if remedies.get("can_appeal"):
+            st.markdown("### 🏛️ Can You Appeal?")
+            st.write(remedies["can_appeal"])
             
-            # Show each answer with clean layout
-            if remedies.get("what_happened"):
-                st.markdown("### 📝 What Happened?")
-                st.info(remedies["what_happened"])
-            
-            if remedies.get("can_appeal"):
-                st.markdown("### 🏛️ Can You Appeal?")
-                st.write(remedies["can_appeal"])
+            # Only show appeal details if they can appeal
+            if "yes" in remedies["can_appeal"].lower():
+                st.markdown("#### Appeal Details")
                 
-                # Only show appeal details if they can appeal
-                if "yes" in remedies["can_appeal"].lower():
-                    st.markdown("#### Appeal Details")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if remedies.get("appeal_days"):
-                            st.metric("Days to File Appeal", remedies["appeal_days"], delta_color="inverse")
-                        if remedies.get("appeal_court"):
-                            st.markdown(f"**Appeal to:** `{remedies['appeal_court']}`")
-                    
-                    with col2:
-                        if remedies.get("cost"):
-                            st.markdown(f"**Estimated Cost:** `{remedies['cost']}`")
-                        if remedies.get("deadline"):
-                            st.markdown(f"**Deadline Note:** {remedies['deadline']}")
-            
-            if remedies.get("first_action"):
-                st.markdown("### 🚀 What Should You Do First?")
-                st.success(f"**Action Plan:** {remedies['first_action']}")
-            
-            if remedies.get("deadline") and not remedies.get("can_appeal"):
-                st.markdown("### ⏰ Important Deadline")
-                st.warning(remedies["deadline"])
-            
-        except Exception as e:
-            st.error(f"Could not render remedies advice: {str(e)}")
-            logging.exception("Remedies rendering failed")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if remedies.get("appeal_days"):
+                        st.metric("Days to File Appeal", remedies["appeal_days"], delta_color="inverse")
+                    if remedies.get("appeal_court"):
+                        st.markdown(f"**Appeal to:** `{remedies['appeal_court']}`")
+                
+                with col2:
+                    if remedies.get("cost"):
+                        st.markdown(f"**Estimated Cost:** `{remedies['cost']}`")
+                    if remedies.get("deadline"):
+                        st.markdown(f"**Deadline Note:** {remedies['deadline']}")
+        
+        if remedies.get("first_action"):
+            st.markdown("### 🚀 What Should You Do First?")
+            st.success(f"**Action Plan:** {remedies['first_action']}")
+        
+        if remedies.get("deadline") and not remedies.get("can_appeal"):
+            st.markdown("### ⏰ Important Deadline")
+            st.warning(remedies["deadline"])
+        
+    except Exception as e:
+        st.error(f"Could not render remedies advice: {str(e)}")
+        logging.exception("Remedies rendering failed")
 
 
 def render_save_to_case_section(user_id, raw_text, summary, remedies):
@@ -243,10 +254,10 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     with col2:
         st.markdown("### New Case")
         with st.expander("➕ Create & Save New Case"):
-            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024")
-            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State")
+            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024").strip()
+            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State").strip()
             new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
@@ -404,18 +415,30 @@ def main():
 
     generate_clicked = st.button("🚀 Generate Summary") if (uploaded_file and is_valid_pdf) else False
     if uploaded_file and generate_clicked:
+        # Build a content-based cache key so re-uploading a modified file with
+        # the same name correctly invalidates the cached result.
+        file_bytes = uploaded_file.getvalue()
+        content_hash = hashlib.md5(file_bytes).hexdigest()
         st.session_state.processed_file = uploaded_file.name
+        st.session_state.processed_file_hash = content_hash
         st.session_state.last_language = language
 
-    if uploaded_file and st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("last_language") == language:
+    current_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest() if uploaded_file else None
+    is_same_file = st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("processed_file_hash") == current_hash
+    if uploaded_file and is_same_file and st.session_state.get("last_language") == language:
         if not client:
             st.error(ui["openrouter_not_configured"])
             return
 
         with st.spinner(ui["processing"]):
             try:
-                # Only call LLM if we haven't processed this exact file/language combo
-                if st.session_state.get("last_processed") != f"{uploaded_file.name}_{language}":
+                # Build the same content-based cache key used when the button was clicked.
+                file_bytes = uploaded_file.getvalue()
+                content_hash = hashlib.md5(file_bytes).hexdigest()
+                cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
+
+                # Only call LLM if we haven't processed this exact file/content/language combo
+                if st.session_state.get("last_processed") != cache_key:
                     raw_text = extract_text_from_pdf(uploaded_file)
                     safe_text = compress_text(raw_text)
 
@@ -464,7 +487,7 @@ def main():
                             timeout=Config.LLM_TIMEOUT,
                         )
 
-                        if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
+                        if retry_summary_raw and len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
                             # Apply structured parsing to retry summary as well
                             summary = parse_summary_bullets(retry_summary_raw)
 
@@ -474,7 +497,7 @@ def main():
                     st.session_state.raw_text = raw_text
                     st.session_state.summary = summary
                     st.session_state.remedies = remedies
-                    st.session_state.last_processed = f"{uploaded_file.name}_{language}"
+                    st.session_state.last_processed = cache_key
                 else:
                     # Load from session
                     raw_text = st.session_state.raw_text
@@ -492,79 +515,77 @@ def main():
                     st.markdown("---")
                     st.markdown(f"## {ui['remedies_title']}")
                     
-                    with st.spinner(ui["remedies_spinner"]):
-                        try:
+                    try:
+                        # Show warning if data is partial
+                        if remedies.get("_is_partial"):
+                            st.warning(ui["partial_warning"])
+                        
+                        # Show each answer
+                        if remedies.get("what_happened"):
+                            st.subheader(ui["what_happened"])
+                            st.write(remedies["what_happened"])
+                        
+                        if remedies.get("can_appeal"):
+                            st.subheader(ui["can_appeal"])
+                            can_appeal_value = remedies["can_appeal"]
+                            st.write(localize_yes_no(can_appeal_value, ui))
                             
-                            # Show warning if data is partial
-                            if remedies.get("_is_partial"):
-                                st.warning(ui["partial_warning"])
-                            
-                            # Show each answer
-                            if remedies.get("what_happened"):
-                                st.subheader(ui["what_happened"])
-                                st.write(remedies["what_happened"])
-                            
-                            if remedies.get("can_appeal"):
-                                st.subheader(ui["can_appeal"])
-                                can_appeal_value = remedies["can_appeal"]
-                                st.write(localize_yes_no(can_appeal_value, ui))
+                            # Only show appeal details if they can appeal
+                            if can_appeal_value.strip().lower() == "yes":
+                                st.subheader(ui["appeal_details"])
                                 
-                                # Only show appeal details if they can appeal
-                                if can_appeal_value.strip().lower() == "yes":
-                                    st.subheader(ui["appeal_details"])
-                                    
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        if remedies.get("appeal_days"):
-                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
-                                        if remedies.get("appeal_court"):
-                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
-                                    
-                                    with col2:
-                                        if remedies.get("cost"):
-                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
-                            
-                            if remedies.get("first_action"):
-                                st.subheader(ui["first_action"])
-                                st.write(f"✅ {remedies['first_action']}")
-                            
-                            if remedies.get("deadline"):
-                                st.subheader(ui["important_deadline"])
-                                st.write(remedies["deadline"])
-                            
-                            # ===== DRAFTING SECTION =====
-                            st.markdown("---")
-                            st.markdown("## 📝 One-Click Drafting Center")
-                            st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
-                            
-                            if st.button("⚡ Generate Legal Draft", key="generate_draft_btn"):
-                                with st.spinner("Drafting your document..."):
-                                    draft, error = generate_legal_draft(remedies, language, client)
-                                    if error:
-                                        st.error(f"Drafting failed: {error}")
-                                    else:
-                                        st.session_state.current_draft = draft
-                                        st.success("✅ Draft generated! You can edit it below.")
-                            
-                            if st.session_state.get("current_draft"):
-                                edited_draft = st.text_area(
-                                    "Edit your draft (placeholders in [BRACKETS])", 
-                                    value=st.session_state.current_draft,
-                                    height=400,
-                                    key="edited_draft_area"
-                                )
-                                st.session_state.current_draft = edited_draft
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    if remedies.get("appeal_days"):
+                                        st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
+                                    if remedies.get("appeal_court"):
+                                        st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
                                 
-                                pdf_bytes = export_draft_to_pdf(edited_draft)
-                                st.download_button(
-                                    label="📥 Download as PDF",
-                                    data=pdf_bytes,
-                                    file_name="Legal_Notice_Draft.pdf",
-                                    mime="application/pdf"
-                                )
+                                with col2:
+                                    if remedies.get("cost"):
+                                        st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
+                        
+                        if remedies.get("first_action"):
+                            st.subheader(ui["first_action"])
+                            st.write(f"✅ {remedies['first_action']}")
+                        
+                        if remedies.get("deadline"):
+                            st.subheader(ui["important_deadline"])
+                            st.write(remedies["deadline"])
+                        
+                        # ===== DRAFTING SECTION =====
+                        st.markdown("---")
+                        st.markdown("## 📝 One-Click Drafting Center")
+                        st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
+                        
+                        if st.button("⚡ Generate Legal Draft", key="generate_draft_btn"):
+                            with st.spinner("Drafting your document..."):
+                                draft, error = generate_legal_draft(remedies, language, client)
+                                if error:
+                                    st.error(f"Drafting failed: {error}")
+                                else:
+                                    st.session_state.current_draft = draft
+                                    st.success("✅ Draft generated! You can edit it below.")
+                        
+                        if st.session_state.get("current_draft"):
+                            edited_draft = st.text_area(
+                                "Edit your draft (placeholders in [BRACKETS])", 
+                                value=st.session_state.current_draft,
+                                height=400,
+                                key="edited_draft_area"
+                            )
+                            st.session_state.current_draft = edited_draft
                             
-                        except Exception as e:
-                            st.error(f"{ui['remedies_error']}: {str(e)}")
+                            pdf_bytes = export_draft_to_pdf(edited_draft)
+                            st.download_button(
+                                label="📥 Download as PDF",
+                                data=pdf_bytes,
+                                file_name="Legal_Notice_Draft.pdf",
+                                mime="application/pdf"
+                            )
+                        
+                    except Exception as e:
+                        st.error(f"{ui['remedies_error']}: {str(e)}")
                     
                     # ===== SAVE TO CASE SECTION =====
                     st.markdown("---")
@@ -610,10 +631,10 @@ def main():
                                 
                         with col2:
                             with st.expander("➕ Or Create New Case"):
-                                new_case_number = st.text_input("Case Number")
-                                new_case_title = st.text_input("Case Title (Optional)")
+                                new_case_number = st.text_input("Case Number").strip()
+                                new_case_title = st.text_input("Case Title (Optional)").strip()
                                 new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
                                         org_id = st.session_state.get("org_id")
@@ -669,6 +690,7 @@ def main():
                     # Show analytics if requested
                     if st.session_state.get("show_analytics"):
                         st.subheader("📊 Quick Analytics Preview")
+                        db = None
                         try:
                             from analytics_engine import AnalyticsAggregator
                             from database import CaseRecord
@@ -681,17 +703,21 @@ def main():
                                 with col1:
                                     st.metric("Total Cases Tracked", summary["total_cases_processed"])
                                 with col2:
-                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
+                                    regional_trends = AnalyticsAggregator.get_regional_trends(db)
+                                    appeal_rate = f"{regional_trends[0]['appeal_success_rate']}%" if regional_trends else 'N/A'
+                                    st.metric("Appeals Success Rate", appeal_rate)
                                 with col3:
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
-                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
+                                if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
+                                    st.switch_page("pages/1_Analytics_Dashboard.py")
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
-                            
-                            db.close()
                         except Exception as e:
                             st.info("Analytics module not ready yet.")
+                        finally:
+                            if db is not None:
+                                db.close()
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")

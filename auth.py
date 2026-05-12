@@ -15,9 +15,10 @@ import logging
 from config import Config
 
 import uuid
-import jwt
-import sendgrid
-from sendgrid.helpers.mail import Mail
+import jwt # type: ignore
+import sendgrid # type: ignore
+from sendgrid.helpers.mail import Mail # type: ignore
+import streamlit as st # type: ignore
 
 from database import (
     SessionLocal,
@@ -740,7 +741,6 @@ def cleanup_old_data() -> int:
 
 def init_auth_session():
     """Initialize authentication state in Streamlit session"""
-    import streamlit as st
 
     if "user_token" not in st.session_state:
         st.session_state.user_token = None
@@ -757,7 +757,6 @@ def login_user(email: str) -> bool:
     Initiate login by sending OTP.
     Stores email in session for verification step.
     """
-    import streamlit as st
 
     init_auth_session()
     st.session_state.pending_email = email
@@ -774,7 +773,6 @@ def verify_login(otp: str) -> bool:
     Verify OTP and complete login.
     Returns True if login successful.
     """
-    import streamlit as st
 
     init_auth_session()
     email = st.session_state.get("pending_email")
@@ -889,7 +887,6 @@ def require_auth() -> bool:
     Use this in pages that require login.
     Returns True if authenticated, False otherwise.
     """
-    import streamlit as st
 
     init_auth_session()
 
@@ -1160,14 +1157,12 @@ def require_auth() -> bool:
 
 def redirect_to_login():
     """Redirect to login page"""
-    import streamlit as st
 
     st.switch_page("pages/0_Login.py")
 
 
 def get_current_user_id() -> Optional[int]:
     """Get current user ID from session"""
-    import streamlit as st
 
     init_auth_session()
 
@@ -1179,7 +1174,6 @@ def get_current_user_id() -> Optional[int]:
 
 def get_current_user_email() -> Optional[str]:
     """Get current user email from session"""
-    import streamlit as st
 
     init_auth_session()
 

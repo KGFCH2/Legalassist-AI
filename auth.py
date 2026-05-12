@@ -33,7 +33,9 @@ from database import (
     is_token_revoked,
     cleanup_expired_revoked_tokens,
     User,
-    OTPVerification,  # Added to fix NameError in request_otp rate limiting
+    OTPVerification,
+    get_user_organizations,
+    get_user_role_in_org,
 )
 
 logger = logging.getLogger(__name__)
@@ -533,7 +535,22 @@ def verify_login(otp: str) -> bool:
         # Get user ID from token payload
         payload = verify_jwt_token(token)
         if payload:
-            st.session_state.user_id = payload.get("user_id")
+            user_id = payload.get("user_id")
+            st.session_state.user_id = user_id
+            
+            # Fetch organization and role for the session
+            db = SessionLocal()
+            orgs = get_user_organizations(db, user_id)
+            if orgs:
+                # For now, default to the first organization
+                st.session_state.org_id = orgs[0].id
+                st.session_state.org_name = orgs[0].name
+                st.session_state.user_role = get_user_role_in_org(db, user_id, orgs[0].id)
+            else:
+                st.session_state.org_id = None
+                st.session_state.org_name = None
+                st.session_state.user_role = None
+            db.close()
 
         st.session_state.is_authenticated = True
         st.session_state.pending_email = None
@@ -558,6 +575,9 @@ def logout_user():
     st.session_state.user_token = None
     st.session_state.user_email = None
     st.session_state.user_id = None
+    st.session_state.org_id = None
+    st.session_state.org_name = None
+    st.session_state.user_role = None
     st.session_state.is_authenticated = False
     st.session_state.pending_email = None
     st.session_state.otp_sent = False

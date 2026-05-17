@@ -146,7 +146,8 @@ def create_app() -> FastAPI:
         )
         
         # Add security scheme
-        openapi_schema["components"]["securitySchemes"] = {
+        components = openapi_schema.setdefault("components", {})
+        components["securitySchemes"] = {
             "bearerAuth": {
                 "type": "http",
                 "scheme": "bearer",

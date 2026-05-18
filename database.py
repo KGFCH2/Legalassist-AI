@@ -9,7 +9,9 @@ working while the refactor continues.
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from typing import Optional, List
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.base import Base

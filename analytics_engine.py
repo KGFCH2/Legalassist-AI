@@ -19,6 +19,18 @@ from sqlalchemy.orm import Query
 logger = logging.getLogger(__name__)
 
 
+def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
+    """Calculate overlap/similarity ratio between two summaries"""
+    import difflib
+    if not s1 or not s2:
+        return 0.0
+    s1_clean = str(s1).strip().lower()
+    s2_clean = str(s2).strip().lower()
+    if not s1_clean or not s2_clean:
+        return 0.0
+    return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
+
+
 class MemoryOptimizationMixin:
     """
     Mixin providing utilities for memory management during intensive data operations.
@@ -496,7 +508,12 @@ class PandasAnalyticsProcessor:
 
 
 class CaseSimilarityCalculator:
-    """Calculate similarity between cases for matching and analysis"""
+    """Calculate similarity between cases for matching and analysis.
+
+    The calculator scores shared case attributes such as type, jurisdiction,
+    party roles, case value, and judgment-summary overlap to support ranked
+    similar-case retrieval.
+    """
     
     @staticmethod
     def case_similarity_score(
@@ -504,8 +521,20 @@ class CaseSimilarityCalculator:
         case2: CaseRecord,
         weights: Optional[Dict[str, float]] = None,
     ) -> float:
-        """
-        Calculate similarity between two cases (0-100).
+        """Calculate a weighted similarity score between two cases.
+
+        The score is normalized to a 0-100 range and combines exact matches on
+        case type, jurisdiction, plaintiff type, defendant type, case value,
+        and optional judgment-summary overlap.
+
+        Args:
+            case1: The reference case to compare.
+            case2: The candidate case to score against the reference.
+            weights: Optional field weights keyed by attribute name. When not
+                provided, a default weight distribution is used.
+
+        Returns:
+            A similarity score between 0.0 and 100.0.
         """
         if not weights:
             weights = {
@@ -555,12 +584,20 @@ class CaseSimilarityCalculator:
         min_similarity: float = 50.0,
         limit: int = 50,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find cases similar to reference case using initial DB-side filtering.
+        """Find cases similar to a reference case using DB pre-filtering.
 
-        Fix: Exclusion filter now correctly references CaseRecord.id (the actual
-        primary key column) instead of the non-existent CaseRecord.case_id field.
-        Previously, the wrong field reference caused the reference case to remain
-        in similarity results, producing self-matching records.
+        The query excludes the reference case itself and narrows candidates to
+        cases that share either the same case type or jurisdiction before
+        applying the in-memory similarity score.
+
+        Args:
+            db: Active SQLAlchemy session.
+            reference_case: Case used as the similarity anchor.
+            min_similarity: Minimum score required for inclusion in results.
+            limit: Maximum number of results to return.
+
+        Returns:
+            A list of ``(CaseRecord, score)`` tuples sorted by score descending.
         """
         # Reduce memory load by pre-filtering on common attributes.
         # FIX: Use CaseRecord.id (primary key) — not case_id — to reliably
@@ -570,8 +607,10 @@ class CaseSimilarityCalculator:
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
-        # Limit the search space to the most recent/relevant 1000 cases to prevent OOM
-        all_cases = query.limit(1000).all()
+        # Limit the search space to prevent OOM. Configurable via SIMILARITY_QUERY_LIMIT env var.
+        # Default 1000 for memory efficiency, increase for larger jurisdictions.
+        max_cases = int(os.getenv("SIMILARITY_QUERY_LIMIT", "1000"))
+        all_cases = query.limit(max_cases).all()
         
         similarities = []
         for case in all_cases:
@@ -589,7 +628,21 @@ class CaseSimilarityCalculator:
         user_id: Optional[str] = None,
         query_signature: Optional[str] = None,
     ) -> float:
-        """Return a small ranking adjustment from historical similarity feedback."""
+        """Return a small ranking adjustment from similarity feedback.
+
+        Historical relevance feedback is aggregated for the candidate case and
+        converted into a bounded ranking delta so prior user judgments can
+        nudge future similarity ordering without dominating the base score.
+
+        Args:
+            db: Active SQLAlchemy session.
+            candidate_case: Case being ranked.
+            user_id: Optional user scope for feedback rows.
+            query_signature: Optional query signature scope for feedback rows.
+
+        Returns:
+            A bounded adjustment in the range ``[-0.03, 0.03]``.
+        """
         query = db.query(SimilarityFeedback).filter(
             SimilarityFeedback.candidate_case_id == candidate_case.id,
         )
@@ -962,6 +1015,20 @@ class PredictiveAnalyticsEngine:
         candidate_case: CaseRecord,
         case_summary: Optional[str] = None,
     ) -> float:
+        """Score a candidate case against a reference profile.
+
+        The method combines the core case similarity score with an additional
+        judgment-summary overlap bonus when a summary is available.
+
+        Args:
+            reference_case: Synthetic or persisted case used as the anchor.
+            candidate_case: Case being evaluated.
+            case_summary: Optional summary text to use instead of the
+                reference case summary.
+
+        Returns:
+            A similarity score capped at 100.0.
+        """
         base_score = CaseSimilarityCalculator.case_similarity_score(reference_case, candidate_case)
         summary_source = case_summary or reference_case.judgment_summary
         summary_bonus = 0.0
@@ -983,7 +1050,24 @@ class PredictiveAnalyticsEngine:
         min_similarity: float = 50.0,
         limit: int = 10,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find similar cases for a user-provided case profile."""
+        """Find similar cases for a user-provided case profile.
+
+        Args:
+            db: Active SQLAlchemy session.
+            case_type: Case type for the synthetic reference profile.
+            jurisdiction: Jurisdiction for the synthetic reference profile.
+            court_name: Optional court name for filtering and scoring.
+            judge_name: Optional judge name for filtering and scoring.
+            plaintiff_type: Optional plaintiff type for filtering and scoring.
+            defendant_type: Optional defendant type for filtering and scoring.
+            case_value: Optional case value for the synthetic profile.
+            case_summary: Optional narrative summary used in scoring.
+            min_similarity: Minimum score required for inclusion in results.
+            limit: Maximum number of results to return.
+
+        Returns:
+            A list of ``(CaseRecord, score)`` tuples sorted by score descending.
+        """
         reference_case = CaseRecord(
             hashed_case_id="prediction-profile",
             case_type=case_type,

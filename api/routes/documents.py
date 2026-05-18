@@ -82,7 +82,7 @@ async def analyze_document(
     return AnalysisJobResponse(
         job_id=task.id,
         status="pending",
-        created_at=__import__('datetime').datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
 
 
@@ -102,7 +102,7 @@ async def get_analysis_status(
     return AnalysisJobResponse(
         job_id=job_id,
         status=status_info["status"],
-        created_at=__import__('datetime').datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         result_url=f"/api/v1/analyze/{job_id}/result" if status_info["status"] == "completed" else None
     )
 
@@ -236,7 +236,7 @@ async def upload_document_file(
         return AnalysisJobResponse(
             job_id=task.id,
             status="pending",
-            created_at=__import__('datetime').datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
     
     except Exception as e:

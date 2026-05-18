@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
 
 from config import Config
+from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
 
 # For consistent language detection results
 DetectorFactory.seed = 0
@@ -90,6 +91,40 @@ def _extract_pages_pypdf(reader: PdfReader) -> str:
         if page_text:
             text += page_text + "\n"
     return text.strip()
+
+
+def _validate_encoding_quality(text: str) -> tuple[bool, float]:
+    """
+    Validate extracted text for encoding quality issues.
+    Returns (is_valid, quality_score) where quality_score is 0.0-1.0.
+    Detects: mojibake, replacement chars, malformed unicode sequences.
+    """
+    if not text:
+        return False, 0.0
+    
+    # Check for replacement characters (U+FFFD) indicating encoding failures
+    replacement_char_count = text.count('\ufffd')
+    replacement_ratio = replacement_char_count / len(text)
+    
+    # Check for common mojibake patterns (question marks, boxes, garbled sequences)
+    garbled_patterns = ['???', '', '\x00', '\x1a']
+    garbled_count = sum(text.count(p) for p in garbled_patterns)
+    garbled_ratio = garbled_count / len(text)
+    
+    # Check for excessive non-ASCII control characters
+    control_chars = sum(1 for c in text if ord(c) < 32 and c not in '\n\t\r')
+    control_ratio = control_chars / len(text)
+    
+    # Calculate quality score (1.0 = perfect, 0.0 = corrupted)
+    quality_score = max(0.0, 1.0 - (replacement_ratio * 10) - (garbled_ratio * 5) - (control_ratio * 3))
+    
+    # Also check if text appears mostly non-printable
+    printable_ratio = sum(1 for c in text if c.isprintable() or c in '\n\t\r') / len(text)
+    if printable_ratio < 0.5:
+        quality_score = min(quality_score, 0.3)
+    
+    is_valid = quality_score >= 0.7 and replacement_ratio < 0.05
+    return is_valid, round(quality_score, 2)
 
 
 def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
@@ -159,6 +194,7 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
 def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages: str = "eng+hin", ocr_dpi: int = 300):
     """Extract text from PDF. Uses parser extraction first, then optional OCR fallback."""
     text = ""
+    parser_errors: List[Exception] = []
     try:
         with pdfplumber.open(uploaded_pdf) as pdf:
             pages = []
@@ -168,7 +204,10 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
                     pages.append(page_text)
             text = "\n".join(pages).strip()
             if text:
-                return text
+                # Validate encoding quality
+                is_valid, quality = _validate_encoding_quality(text)
+                if is_valid:
+                    return text
     except Exception:
         pass
 
@@ -178,11 +217,19 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
         reader = PdfReader(uploaded_pdf)
         text = _extract_pages_pypdf(reader)
         if text:
-            return text
+            # Validate encoding quality before returning
+            is_valid, quality = _validate_encoding_quality(text)
+            if is_valid:
+                return text
     except Exception:
         pass
 
     if not enable_ocr:
+        if parser_errors:
+            raise PDFProcessingError(
+                "Failed to extract text from PDF using pdfplumber and pypdf.",
+                parser_errors[-1],
+            )
         raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
 
     try:
@@ -190,8 +237,9 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
         import pytesseract
         from pytesseract import Output
     except Exception as e:
-        raise RuntimeError(
-            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."
+        raise OCRDependencyError(
+            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries.",
+            e,
         ) from e
 
     if hasattr(uploaded_pdf, "seek"):
@@ -202,27 +250,33 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
     if not data:
         raise ValueError("Unable to read PDF bytes for OCR.")
 
-    images = convert_from_bytes(data, dpi=ocr_dpi)
+    try:
+        images = convert_from_bytes(data, dpi=ocr_dpi)
+    except Exception as e:
+        raise OCRProcessingError(f"Failed to convert PDF pages to images for OCR: {e}", e)
     pages_out: List[str] = []
     conf_scores: List[float] = []
     for image in images:
-        ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
-        page_text = _extract_layout_text_from_tesseract_data(ocr_data)
-        if page_text:
-            pages_out.append(page_text)
-        vals = []
-        for c in ocr_data.get("conf", []):
-            try:
-                cv = float(c)
-                if cv >= 0:
-                    vals.append(cv)
-            except Exception:
-                continue
-        if vals:
-            conf_scores.append(sum(vals) / len(vals))
+        try:
+            ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+            page_text = _extract_layout_text_from_tesseract_data(ocr_data)
+            if page_text:
+                pages_out.append(page_text)
+            vals = []
+            for c in ocr_data.get("conf", []):
+                try:
+                    cv = float(c)
+                    if cv >= 0:
+                        vals.append(cv)
+                except Exception:
+                    continue
+            if vals:
+                conf_scores.append(sum(vals) / len(vals))
+        except Exception as e:
+            raise OCRProcessingError(f"OCR failed while processing a page: {e}", e)
     text = "\n\n".join(pages_out).strip()
     if not text:
-        raise ValueError("OCR completed but no readable text was extracted.")
+        raise OCRProcessingError("OCR completed but no readable text was extracted.")
     if conf_scores:
         logging.info("ocr_confidence_avg=%.2f", sum(conf_scores) / len(conf_scores))
     return text

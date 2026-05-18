@@ -284,7 +284,7 @@ class TaskStatus:
             "task_id": task_id,
             "status": status,
             "info": info,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     
     @staticmethod
@@ -471,7 +471,8 @@ def analyze_document_task(
             "obligations": [],
             "confidence_score": 0.85 if not remedies_data.get("_is_partial") else 0.6,
             "analysis_time_seconds": analysis_time,
-            "processed_at": datetime.utcnow().isoformat()
+            "processed_at": datetime.now(timezone.utc).isoformat()
+
         }
         
         logger.info(
@@ -592,7 +593,7 @@ def generate_report_task(
             "file_name": generated.file_name,
             "mime_type": generated.mime_type,
             "file_size_bytes": generated.file_size_bytes,
-            "generated_at": datetime.utcnow().isoformat()
+            "generated_at": datetime.now(timezone.utc).isoformat()
         }
 
         logger.info(
@@ -667,7 +668,7 @@ def export_data_task(
         # Create export data (placeholder - integrate with real data query)
         export_data = {
             "user_id": user_id,
-            "export_timestamp": datetime.utcnow().isoformat(),
+            "export_timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"placeholder": "User data would be populated from database"}
         }
         
@@ -760,7 +761,7 @@ def send_notification_task(
             "user_id": user_id,
             "type": notification_type,
             "status": "dispatched",
-            "sent_at": datetime.utcnow().isoformat()
+            "sent_at": datetime.now(timezone.utc).isoformat()
         }
         
         return result

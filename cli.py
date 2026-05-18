@@ -105,17 +105,6 @@ def get_api_semaphore() -> threading.Semaphore:
     return _API_SEMAPHORE
 
 
-def _reinitialize_semaphore(concurrency: int) -> None:
-    """Replace the global API semaphore with a new one sized to *concurrency*.
-
-    Calling this before any worker threads are spawned ensures the correct
-    limit is applied regardless of whether execution entered through main()
-    or directly via process_command / batch_command (e.g. in tests).
-    """
-    global API_SEMAPHORE
-    API_SEMAPHORE = threading.Semaphore(concurrency)
-
-
 
 class CLIError(Exception):
     pass
@@ -299,7 +288,7 @@ def _chat_completion(
             # We don't retry on other errors (like auth or invalid params) 
             # to avoid infinite loops on fatal configuration issues.
             LOGGER.debug("chat_completion_fatal_error", error=str(e), error_type=type(e).__name__)
-            raise e
+            raise
     
     if last_err:
         raise last_err

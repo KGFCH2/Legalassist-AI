@@ -34,6 +34,9 @@ from database import (
     revoke_token,
     is_token_revoked,
     cleanup_expired_revoked_tokens,
+    OTPVerification,
+    _get_otp_rate_limit_script,
+    _otp_rate_limit_key,
     User,
 )
 
@@ -201,7 +204,14 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
 
         # Store OTP
         try:
-            create_otp_verification(db, email, otp_hash, expires_at, requester_ip=requester_ip)
+            create_otp_verification(
+                db,
+                email,
+                otp_hash,
+                expires_at,
+                max_requests_per_hour=OTP_REQUEST_RATE_LIMIT_MAX,
+                requester_ip=requester_ip,
+            )
         except ValueError as exc:
             return False, str(exc)
 

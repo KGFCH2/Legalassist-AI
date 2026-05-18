@@ -19,15 +19,16 @@ import uuid
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
-from datetime import datetime
-import structlog
+from report_service import _get_reports_base_dir
+from sqlalchemy.orm import Session
 
 from report_service import _get_reports_base_dir
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
 from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
-from db.session import get_db
-from db.crud import create_report, get_report_by_id, list_reports_by_user, update_report_status
+from database import get_db, Report
+import structlog
+from datetime import datetime
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 logger = structlog.get_logger(__name__)
@@ -41,8 +42,8 @@ logger = structlog.get_logger(__name__)
 async def generate_report(
     request: ReportGenerationRequest,
     http_request: Request,
-    current_user: CurrentUser = Depends(get_current_user),
-    db = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
     Generate a legal report asynchronously
@@ -65,6 +66,20 @@ async def generate_report(
         case_id=request.case_id,
         report_type=request.report_type
     )
+
+    report_id = str(uuid.uuid4())
+
+    # Create the report record in the database
+    db_report = Report(
+        report_id=report_id,
+        user_id=current_user.user_id,
+        case_id=request.case_id,
+        report_type=request.report_type,
+        format=request.format,
+        status="pending",
+    )
+    db.add(db_report)
+    db.commit()
     
     # Step 1: Create and persist Report record BEFORE enqueueing task
     # This ensures we have report_id and can track the task reliably
@@ -102,8 +117,14 @@ async def generate_report(
         case_id=str(case_id_int),
         report_id=report_id,
         report_type=request.report_type,
-        format=request.format
+        format=request.format,
+        report_id=report_id,
     )
+
+    # Save job_id to the database record
+    db_report.job_id = task.id
+    db.commit()
+    db.refresh(db_report)
     
     # Step 3: Update Report record with actual celery_task_id
     update_report_status(db, report_id, status="pending")
@@ -117,13 +138,13 @@ async def generate_report(
     logger.info("Task enqueued", report_id=report_id, task_id=task.id)
     
     return ReportGenerationResponse(
-        report_id=report_id,
+        report_id=db_report.report_id,
         job_id=task.id,
         case_id=request.case_id,
         status="pending",
         report_type=request.report_type,
         format=request.format,
-        created_at=datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
 
 
@@ -134,8 +155,8 @@ async def generate_report(
 )
 async def get_report_status(
     report_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-    db = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
     Get status of report generation job.
@@ -153,20 +174,42 @@ async def get_report_status(
             detail="Report not found"
         )
     
-    # Get Celery task status using stored celery_task_id
-    status_info = TaskStatus.get_task_status(db_report.celery_task_id)
+    db_report = db.query(Report).filter(
+        Report.report_id == report_id,
+        Report.user_id == current_user.user_id
+    ).first()
+    
+    if not db_report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found"
+        )
+    
+    status_str = db_report.status
+    if db_report.status in ["pending", "processing"] and db_report.job_id:
+        try:
+            status_info = TaskStatus.get_task_status(db_report.job_id)
+            celery_status = status_info["status"]
+            if celery_status != db_report.status:
+                db_report.status = celery_status
+                if celery_status == "completed":
+                    db_report.completed_at = datetime.utcnow()
+                db.commit()
+                db.refresh(db_report)
+                status_str = db_report.status
+        except Exception:
+            pass
     
     return ReportGenerationResponse(
         report_id=report_id,
         job_id=db_report.celery_task_id,
         case_id=str(db_report.case_id),
         status=status_info["status"],
-        report_type=db_report.report_type.value,
-        format=db_report.format.value,
-        download_url=f"/api/v1/reports/{report_id}/download" if db_report.status.value == "completed" else None,
-        file_size_bytes=db_report.file_size_bytes,
-        created_at=db_report.created_at,
-        completed_at=db_report.completed_at
+        report_type="comprehensive",
+        format="pdf",
+        download_url=f"/api/v1/reports/{report_id}/download" if status_info["status"] == "completed" else None,
+        created_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc) if status_info["status"] == "completed" else None
     )
 
 
@@ -176,8 +219,8 @@ async def get_report_status(
 )
 async def download_report(
     report_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-    db = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user)
 ):
     """
     Download the generated report file.
@@ -188,8 +231,10 @@ async def download_report(
     - Confirms status is completed before download
     """
     
-    # Retrieve Report record from DB
-    db_report = get_report_by_id(db, report_id, user_id=current_user.user_id)
+    db_report = db.query(Report).filter(
+        Report.report_id == report_id,
+        Report.user_id == current_user.user_id
+    ).first()
     
     if not db_report:
         raise HTTPException(
@@ -197,28 +242,33 @@ async def download_report(
             detail="Report not found"
         )
     
-    # Validate ownership
-    if db_report.user_id != current_user.user_id:
-        logger.warning(
-            "Unauthorized download attempt",
-            report_id=report_id,
-            owner_id=db_report.user_id,
-            requester_id=current_user.user_id
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to download this report"
-        )
-    
-    # Check status
-    if db_report.status.value != "completed":
+    status_str = db_report.status
+    if db_report.status in ["pending", "processing"] and db_report.job_id:
+        try:
+            status_info = TaskStatus.get_task_status(db_report.job_id)
+            celery_status = status_info["status"]
+            if celery_status != db_report.status:
+                db_report.status = celery_status
+                if celery_status == "completed":
+                    db_report.completed_at = datetime.utcnow()
+                db.commit()
+                db.refresh(db_report)
+                status_str = db_report.status
+        except Exception:
+            pass
+
+    if status_str != "completed":
         raise HTTPException(
             status_code=status.HTTP_202_ACCEPTED,
-            detail=f"Report is still {db_report.status.value}"
+            detail=f"Report is still {status_str}"
         )
     
-    # Validate file exists at stored path
-    if not db_report.file_path:
+    base_dir = _get_reports_base_dir()
+    user_dir = base_dir / str(current_user.user_id)
+
+    # Find by any report file that ends with the report_id.
+    # Filenames are: <case_id>_<report_type>_<report_id>.<ext>
+    if not user_dir.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report file path not found in database"
@@ -231,6 +281,13 @@ async def download_report(
             report_id=report_id,
             expected_path=str(file_path)
         )
+
+    ext = ".pdf" if db_report.format == "pdf" else f".{db_report.format}"
+    matches = list(user_dir.glob(f"*_{report_id}{ext}"))
+    if not matches:
+        matches = list(user_dir.glob(f"*{report_id}{ext}"))
+
+    if not matches:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report file not found on disk"
@@ -245,7 +302,7 @@ async def download_report(
     
     return FileResponse(
         path=file_path,
-        media_type="application/pdf",
+        media_type="application/pdf" if db_report.format == "pdf" else "application/octet-stream",
         filename=file_path.name,
     )
 
@@ -257,9 +314,8 @@ async def download_report(
 async def list_reports(
     limit: int = 10,
     offset: int = 0,
-    status_filter: str = None,
-    current_user: CurrentUser = Depends(get_current_user),
-    db = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
     """
     Get list of generated reports for current user with pagination.
@@ -290,10 +346,42 @@ async def list_reports(
         for r in reports
     ]
     
+    query = db.query(Report).filter(Report.user_id == current_user.user_id)
+    total = query.count()
+    reports = query.order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
+
+    reports_data = []
+    for r in reports:
+        status_str = r.status
+        if r.status in ["pending", "processing"] and r.job_id:
+            try:
+                status_info = TaskStatus.get_task_status(r.job_id)
+                celery_status = status_info["status"]
+                if celery_status != r.status:
+                    r.status = celery_status
+                    if celery_status == "completed":
+                        r.completed_at = datetime.utcnow()
+                    db.commit()
+                    status_str = r.status
+            except Exception:
+                pass
+
+        reports_data.append({
+            "report_id": r.report_id,
+            "job_id": r.job_id or "unknown",
+            "case_id": r.case_id,
+            "status": status_str,
+            "report_type": r.report_type or "comprehensive",
+            "format": r.format,
+            "download_url": f"/api/v1/reports/{r.report_id}/download" if status_str == "completed" else None,
+            "created_at": r.created_at,
+            "completed_at": r.completed_at
+        })
+        
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "reports": report_dicts
+        "reports": reports_data
     }
 

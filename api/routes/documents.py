@@ -4,6 +4,7 @@ POST /api/v1/analyze/document - Analyze document asynchronously
 GET /api/v1/analyze/{job_id} - Check analysis job status
 """
 import uuid
+from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
@@ -67,21 +68,22 @@ async def analyze_document(
     )
     
     # Queue async task
-    text = request.text or f"Content from {request.file_url or request.file_path}"
     task = enqueue_task_from_http_request(
         analyze_document_task,
         http_request,
         context_user_id=current_user.user_id,
         user_id=current_user.user_id,
         document_id=document_id,
-        text=text,
+        text=request.text,
+        file_path=request.file_path,
+        file_url=request.file_url,
         document_type=request.document_type,
     )
     
     return AnalysisJobResponse(
         job_id=task.id,
         status="pending",
-        created_at=__import__('datetime').datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
 
 
@@ -101,7 +103,7 @@ async def get_analysis_status(
     return AnalysisJobResponse(
         job_id=job_id,
         status=status_info["status"],
-        created_at=__import__('datetime').datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         result_url=f"/api/v1/analyze/{job_id}/result" if status_info["status"] == "completed" else None
     )
 
@@ -235,7 +237,7 @@ async def upload_document_file(
         return AnalysisJobResponse(
             job_id=task.id,
             status="pending",
-            created_at=__import__('datetime').datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
     
     except Exception as e:

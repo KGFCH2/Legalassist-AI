@@ -1,8 +1,8 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
 from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseStatus, DocumentType
-from .auth import User, OTPVerification
+from .auth import User, OTPVerification, APIKey, APIKey
 from .feedback import UserFeedback
-from .reports import Report, ReportStatus, ReportType, ReportFormat
+from .reports import Report
 from .analytics import (
     CaseRecord,
     CaseOutcome,
@@ -34,11 +34,9 @@ __all__ = [
     "DocumentType",
     "User",
     "OTPVerification",
+    "APIKey",
     "UserFeedback",
     "Report",
-    "ReportStatus",
-    "ReportType",
-    "ReportFormat",
     "CaseRecord",
     "CaseOutcome",
     "CaseAnalytics",
@@ -53,3 +51,4 @@ __all__ = [
     "KnowledgeGraphEdge",
     "PrecedentMatch",
 ]
+

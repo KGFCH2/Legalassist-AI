@@ -56,7 +56,8 @@ class APISettings(BaseSettings):
     
     # Authentication
     AUTH_ENABLED: bool = True
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET", os.getenv("JWT_SECRET_KEY", ""))
+    JWT_SECRET_KEY_PREVIOUS: str = os.getenv("JWT_SECRET_PREVIOUS", os.getenv("JWT_SECRET_KEY_PREVIOUS", ""))
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
@@ -68,7 +69,7 @@ class APISettings(BaseSettings):
     def validate_jwt_secret(cls, v: str) -> str:
         if not v or v == "your-secret-key-change-in-production":
             raise ValueError(
-                "JWT_SECRET_KEY must be set to a secure value. "
+                "JWT_SECRET (or JWT_SECRET_KEY) must be set to a secure value. "
                 "Do not use default or placeholder values in production."
             )
         return v
@@ -78,13 +79,23 @@ class APISettings(BaseSettings):
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
     
-    # Redis
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # Redis - require explicit configuration
+    _redis_env = os.getenv("REDIS_URL")
+    if not _redis_env:
+        raise ValueError("REDIS_URL environment variable is required. No localhost fallback.")
+    REDIS_URL: str = _redis_env
     REDIS_CACHE_TTL: int = 3600  # 1 hour
     
-    # Celery
-    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
-    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
+    # Celery - require explicit configuration
+    _celery_broker = os.getenv("CELERY_BROKER_URL")
+    if not _celery_broker:
+        raise ValueError("CELERY_BROKER_URL environment variable is required.")
+    CELERY_BROKER_URL: str = _celery_broker
+    
+    _celery_backend = os.getenv("CELERY_RESULT_BACKEND")
+    if not _celery_backend:
+        raise ValueError("CELERY_RESULT_BACKEND environment variable is required.")
+    CELERY_RESULT_BACKEND: str = _celery_backend
     CELERY_TASK_TIMEOUT: int = 3600  # 1 hour
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
     
@@ -121,6 +132,18 @@ class APISettings(BaseSettings):
     ENABLE_ANALYTICS: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
     
     def __init__(self, **data):
+        # Enforce canonical env var precedence BEFORE Pydantic validates fields.
+        # JWT_SECRET takes priority over the legacy JWT_SECRET_KEY alias.
+        # Init kwargs have the highest priority in Pydantic v2 BaseSettings, so
+        # injecting here ensures the field_validator sees the canonical value.
+        if not data.get("JWT_SECRET_KEY"):
+            canonical = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY", "")
+            if canonical:
+                data["JWT_SECRET_KEY"] = canonical
+        if not data.get("JWT_SECRET_KEY_PREVIOUS"):
+            canonical_prev = os.getenv("JWT_SECRET_PREVIOUS") or os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
+            if canonical_prev:
+                data["JWT_SECRET_KEY_PREVIOUS"] = canonical_prev
         super().__init__(**data)
         # Parse ALLOWED_HOSTS from environment
         hosts_env = os.getenv("APP_ALLOWED_HOSTS", "")

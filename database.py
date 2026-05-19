@@ -136,6 +136,7 @@ __all__ = [
     "Report",
     "create_case_deadline",
     "get_upcoming_deadlines",
+    "get_prefs_by_user_ids",
     "get_user_deadlines",
     "has_notification_been_sent",
     "log_notification",
@@ -181,6 +182,7 @@ __all__ = [
     "get_attachments_for_case",
     "submit_similarity_feedback",
     "get_similarity_feedback",
+    "aggregate_model_performance",
 ]
 
 
@@ -642,7 +644,7 @@ def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
+        CaseDeadline.is_completed.is_(False),
         CaseDeadline.deadline_date > now,
     ).order_by(CaseDeadline.deadline_date).all()
 
@@ -676,7 +678,7 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
+        CaseDeadline.is_completed.is_(False),
         CaseDeadline.deadline_date > now,
     ).count()
 
@@ -781,7 +783,7 @@ def create_timeline_event(
         event_date=event_date or dt.datetime.now(dt.timezone.utc),
         event_metadata=metadata,
     )
-    db.add(doc)
+    db.add(event)
     db.commit()
     db.refresh(event)
     return event
@@ -904,6 +906,10 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
     db.commit()
     db.refresh(token)
     return token
+
+def aggregate_model_performance(db: Session, task: str = None) -> list:
+    return []
+
 
 
 def cleanup_expired_revoked_tokens(db: Session) -> int:

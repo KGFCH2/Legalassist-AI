@@ -1,5 +1,5 @@
 import datetime as dt
-from typing import Optional, List
+from typing import Optional, List, Iterable
 from sqlalchemy.orm import Session
 from db.models.notifications import NotificationLog, NotificationStatus, NotificationChannel, NotificationTemplate, UserPreference
 from db.models.cases import CaseDeadline, Case
@@ -119,10 +119,18 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
     now = now_utc
     target_date = target_utc
     return db.query(CaseDeadline).filter(
-        CaseDeadline.is_completed == False,
+        CaseDeadline.is_completed.is_(False),
         CaseDeadline.deadline_date <= target_date,
         CaseDeadline.deadline_date > now,
     ).all()
+
+
+def get_prefs_by_user_ids(db: Session, user_ids: Iterable[int]) -> List[UserPreference]:
+    user_ids = list(user_ids)
+    if not user_ids:
+        return []
+
+    return db.query(UserPreference).filter(UserPreference.user_id.in_(user_ids)).all()
 
 
 def has_notification_been_sent(

@@ -12,6 +12,15 @@ from db.models import CaseDeadline
 from .timeline_service import timeline_service
 
 
+_APPEAL_CONTEXT_PATTERNS = (
+    r"file(?:\s+an?)?\s+appeal",
+    r"notice\s+of\s+appeal",
+    r"appeal\s+(?:should|must)\s+be\s+filed",
+    r"appeal\s+(?:to|within|in|against)",
+    r"challenge(?:d)?(?:\s+the)?(?:\s+\w+)?",
+)
+
+
 def _extract_days_from_text(text: str) -> Optional[int]:
     if not text or not isinstance(text, str):
         return None
@@ -21,13 +30,22 @@ def _extract_days_from_text(text: str) -> Optional[int]:
     if text.isdigit():
         return int(text)
 
-    primary_match = re.search(r"(\d+)\s*days?\b", text, re.IGNORECASE)
-    if primary_match:
-        return int(primary_match.group(1))
+    appeal_context = r"(?:" + "|".join(_APPEAL_CONTEXT_PATTERNS) + r")"
+    patterns = (
+        re.compile(
+            rf"\b(?P<context>{appeal_context})\b(?:[^.\n]{{0,80}})?\b(?P<days>\d+)\s*days?\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"\b(?P<days>\d+)\s*days?\b(?:[^.\n]{{0,80}})?\b(?P<context>{appeal_context})\b",
+            re.IGNORECASE,
+        ),
+    )
 
-    fallback_match = re.search(r"(?:in|within|after)\s+(\d+)\s*days?", text, re.IGNORECASE)
-    if fallback_match:
-        return int(fallback_match.group(1))
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            return int(match.group("days"))
 
     return None
 

@@ -13,6 +13,8 @@ from db.models import (
     CaseRecord,
     CaseStatus,
     CaseTimeline,
+    CaseNote,
+    CaseNoteVersion,
     ModelFeedback,
     UserFeedback,
 )
@@ -106,6 +108,111 @@ def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
 def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
     """Get a document by ID"""
     return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+
+
+def get_case_note(db: Session, case_id: int, user_id: int) -> Optional[CaseNote]:
+    """Get the editable note state for a case owned by the user."""
+    return (
+        db.query(CaseNote)
+        .filter(
+            CaseNote.case_id == case_id,
+            CaseNote.user_id == user_id,
+        )
+        .first()
+    )
+
+
+def save_case_note_draft(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    note_text: str,
+    changed_by_email: Optional[str] = None,
+) -> CaseNote:
+    """Persist the current draft text without creating a published version."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        raise ValueError("Case not found or not owned by user")
+
+    note = get_case_note(db, case_id, user_id)
+    if not note:
+        note = CaseNote(case_id=case_id, user_id=user_id, draft_text=note_text)
+        db.add(note)
+    else:
+        note.draft_text = note_text
+        note.draft_updated_at = dt.datetime.now(dt.timezone.utc)
+
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+def publish_case_note(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    note_text: Optional[str] = None,
+    changed_by_email: Optional[str] = None,
+) -> CaseNoteVersion:
+    """Create an immutable published version from the current draft."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        raise ValueError("Case not found or not owned by user")
+
+    note = get_case_note(db, case_id, user_id)
+    if not note:
+        note = CaseNote(case_id=case_id, user_id=user_id, draft_text=note_text or "")
+        db.add(note)
+        db.flush()
+    elif note_text is not None:
+        note.draft_text = note_text
+        note.draft_updated_at = dt.datetime.now(dt.timezone.utc)
+
+    current_text = note_text if note_text is not None else note.draft_text
+    if current_text is None:
+        current_text = ""
+
+    next_version = (
+        db.query(CaseNoteVersion.version_number)
+        .filter(CaseNoteVersion.case_id == case_id, CaseNoteVersion.note_id == note.id)
+        .order_by(CaseNoteVersion.version_number.desc())
+        .first()
+    )
+    version_number = (next_version[0] if next_version else 0) + 1
+
+    version = CaseNoteVersion(
+        note_id=note.id,
+        case_id=case_id,
+        version_number=version_number,
+        note_text=current_text,
+        change_type="published",
+        changed_by_user_id=user_id,
+        changed_by_email=changed_by_email,
+        version_metadata={"published_from_draft": True},
+    )
+    note.published_text = current_text
+    note.published_at = dt.datetime.now(dt.timezone.utc)
+    note.published_version_id = version_number
+
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    db.refresh(note)
+    return version
+
+
+def get_case_note_history(db: Session, case_id: int, user_id: int) -> List[CaseNoteVersion]:
+    """Get immutable published note versions for a case."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        return []
+
+    return (
+        db.query(CaseNoteVersion)
+        .filter(CaseNoteVersion.case_id == case_id)
+        .order_by(CaseNoteVersion.version_number.desc(), CaseNoteVersion.created_at.desc())
+        .all()
+    )
 
 
 def update_case_document(

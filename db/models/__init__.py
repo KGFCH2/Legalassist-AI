@@ -1,5 +1,5 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
-from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseStatus, DocumentType
+from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, CaseStatus, DocumentType
 from .auth import User, OTPVerification, APIKey, APIKey
 from .feedback import UserFeedback
 from .reports import Report, ReportStatus, ReportType, ReportFormat
@@ -30,6 +30,8 @@ __all__ = [
     "CaseDocument",
     "Attachment",
     "CaseTimeline",
+    "CaseNote",
+    "CaseNoteVersion",
     "CaseStatus",
     "DocumentType",
     "User",

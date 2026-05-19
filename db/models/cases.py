@@ -82,6 +82,7 @@ class Case(Base):
     documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan")
     deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
     timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
+    notes = relationship("CaseNote", back_populates="case", cascade="all, delete-orphan")
     attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan")
 
 
@@ -129,3 +130,38 @@ class CaseTimeline(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     case = relationship("Case", back_populates="timeline_events", cascade="all, delete-orphan")
+
+
+class CaseNote(Base):
+    __tablename__ = "case_notes"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    draft_text = Column(Text, nullable=False, default="")
+    published_text = Column(Text, nullable=True)
+    published_version_id = Column(Integer, nullable=True)
+    draft_updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    case = relationship("Case", back_populates="notes")
+    versions = relationship("CaseNoteVersion", back_populates="note", cascade="all, delete-orphan", order_by="CaseNoteVersion.version_number")
+
+
+class CaseNoteVersion(Base):
+    __tablename__ = "case_note_versions"
+
+    id = Column(Integer, primary_key=True)
+    note_id = Column(Integer, ForeignKey("case_notes.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    note_text = Column(Text, nullable=False)
+    change_type = Column(String(50), nullable=False, default="published")
+    changed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    changed_by_email = Column(String(255), nullable=True)
+    version_metadata = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    note = relationship("CaseNote", back_populates="versions")

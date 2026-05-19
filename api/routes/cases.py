@@ -12,6 +12,10 @@ from api.models import (
     CaseSearchRequest, CaseSearchResponse, CaseResult,
     CaseTimeline, CaseEvent, SimilarityFeedbackRequest,
     SimilarityFeedbackResponse,
+    CaseNoteDraftRequest,
+    CaseNotePublishRequest,
+    CaseNoteHistoryResponse,
+    CaseNoteVersionItem,
 )
 from api.auth import get_current_user, CurrentUser
 import structlog
@@ -23,6 +27,9 @@ from database import (
     get_db,
     submit_similarity_feedback,
     Case,
+    save_case_note_draft,
+    publish_case_note,
+    get_case_note_history,
 )
 from analytics_engine import CaseSimilarityCalculator
 
@@ -378,6 +385,127 @@ async def get_case_details(
         "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
         "summary": latest_doc.summary if latest_doc else ""
     }
+
+
+@router.post(
+    "/{case_id}/notes/draft",
+    summary="Save case note draft",
+)
+async def save_case_note_draft_endpoint(
+    case_id: str,
+    request: CaseNoteDraftRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    note = save_case_note_draft(
+        db,
+        case_id=case_id_int,
+        user_id=user_id_int,
+        note_text=request.note_text,
+        changed_by_email=current_user.email,
+    )
+    return {
+        "case_id": str(case_id_int),
+        "note_id": note.id,
+        "draft_text": note.draft_text,
+        "draft_updated_at": note.draft_updated_at,
+        "published_at": note.published_at,
+    }
+
+
+@router.post(
+    "/{case_id}/notes/publish",
+    summary="Publish case note",
+)
+async def publish_case_note_endpoint(
+    case_id: str,
+    request: CaseNotePublishRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    version = publish_case_note(
+        db,
+        case_id=case_id_int,
+        user_id=user_id_int,
+        note_text=request.note_text,
+        changed_by_email=current_user.email,
+    )
+    return {
+        "case_id": str(case_id_int),
+        "version_number": version.version_number,
+        "note_text": version.note_text,
+        "changed_by_user_id": str(version.changed_by_user_id),
+        "changed_by_email": version.changed_by_email,
+        "created_at": version.created_at,
+        "version_metadata": version.version_metadata,
+    }
+
+
+@router.get(
+    "/{case_id}/notes/history",
+    response_model=CaseNoteHistoryResponse,
+    summary="Get case note history",
+)
+async def get_case_note_history_endpoint(
+    case_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CaseNoteHistoryResponse:
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    versions = get_case_note_history(db, case_id_int, user_id_int)
+    return CaseNoteHistoryResponse(
+        case_id=str(case_id_int),
+        case_number=case.case_number,
+        title=case.title or case.case_number,
+        total_versions=len(versions),
+        versions=[
+            CaseNoteVersionItem(
+                version_number=version.version_number,
+                note_text=version.note_text,
+                change_type=version.change_type,
+                changed_by_user_id=str(version.changed_by_user_id),
+                changed_by_email=version.changed_by_email,
+                created_at=version.created_at,
+                version_metadata=version.version_metadata,
+            )
+            for version in versions
+        ],
+    )
 
 
 @router.get(

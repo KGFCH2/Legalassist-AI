@@ -213,6 +213,34 @@ class CaseTimeline(BaseModel):
     duration_years: float
 
 
+class CaseNoteDraftRequest(BaseModel):
+    case_id: Optional[str] = None
+    note_text: str = Field(..., min_length=1)
+
+
+class CaseNotePublishRequest(BaseModel):
+    case_id: Optional[str] = None
+    note_text: Optional[str] = None
+
+
+class CaseNoteVersionItem(BaseModel):
+    version_number: int
+    note_text: str
+    change_type: str
+    changed_by_user_id: str
+    changed_by_email: Optional[str] = None
+    created_at: datetime
+    version_metadata: Optional[Dict[str, Any]] = None
+
+
+class CaseNoteHistoryResponse(BaseModel):
+    case_id: str
+    case_number: str
+    title: str
+    total_versions: int
+    versions: List[CaseNoteVersionItem]
+
+
 # ============================================================================
 # Report Generation Models
 # ============================================================================

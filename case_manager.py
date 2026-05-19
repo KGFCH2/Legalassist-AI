@@ -19,6 +19,7 @@ from database import (
     SessionLocal,
     Case,
     CaseDocument,
+    CaseNote,
     CaseTimeline,
     CaseDeadline,
     CaseStatus,
@@ -31,9 +32,13 @@ from database import (
     get_case_timeline,
     create_case_document,
     create_timeline_event,
+    get_case_note,
+    get_case_note_history,
+    publish_case_note,
     update_case_status,
     create_attachment,
     get_attachments_for_case,
+    save_case_note_draft,
 )
 from services.timeline_service import timeline_service as _timeline_service
 from services.deadlines_auto_creator import (
@@ -382,6 +387,47 @@ def get_case_full_timeline(user_id: int, case_id: int) -> List[Dict[str, Any]]:
             return []
 
         return _timeline_service.get_case_full_timeline(db, case_id)
+    finally:
+        db.close()
+
+
+def get_case_note_state(user_id: int, case_id: int):
+    db = SessionLocal()
+    try:
+        case = get_case_by_id(db, case_id)
+        if not case or case.user_id != user_id:
+            return None
+        return get_case_note(db, case_id, user_id)
+    finally:
+        db.close()
+
+
+def save_case_note(user_id: int, case_id: int, note_text: str, changed_by_email: Optional[str] = None):
+    db = SessionLocal()
+    try:
+        return save_case_note_draft(db, case_id, user_id, note_text, changed_by_email=changed_by_email)
+    except Exception as e:
+        logger.error(f"Error saving case note draft: {str(e)}")
+        return None
+    finally:
+        db.close()
+
+
+def publish_case_note_for_case(user_id: int, case_id: int, note_text: Optional[str] = None, changed_by_email: Optional[str] = None):
+    db = SessionLocal()
+    try:
+        return publish_case_note(db, case_id, user_id, note_text=note_text, changed_by_email=changed_by_email)
+    except Exception as e:
+        logger.error(f"Error publishing case note: {str(e)}")
+        return None
+    finally:
+        db.close()
+
+
+def get_case_note_history_for_case(user_id: int, case_id: int):
+    db = SessionLocal()
+    try:
+        return get_case_note_history(db, case_id, user_id)
     finally:
         db.close()
 

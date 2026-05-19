@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from auth import require_auth, redirect_to_login, get_current_user_id
 import routes
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
-from case_manager import upload_case_attachment
+from case_manager import upload_case_attachment, get_case_note_state, save_case_note, publish_case_note_for_case, get_case_note_history_for_case
 from core import extract_text_from_pdf
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
 import pytz
@@ -89,6 +89,58 @@ def render_timeline_section(timeline: list):
                 """,
                 unsafe_allow_html=True,
             )
+
+
+def render_case_notes_section(case_id: int, user_id: int):
+    """Render draft and version controls for case notes."""
+    st.subheader("🗒️ Case Notes")
+
+    note = get_case_note_state(user_id, case_id)
+    draft_key = f"case_note_draft_{case_id}"
+    history_key = f"case_note_history_open_{case_id}"
+
+    if draft_key not in st.session_state:
+        st.session_state[draft_key] = note.draft_text if note else ""
+
+    st.text_area(
+        "Draft note",
+        height=200,
+        key=draft_key,
+        placeholder="Capture the latest update, next step, or internal note...",
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("Save Draft", use_container_width=True, key=f"save_case_note_{case_id}"):
+            saved = save_case_note(user_id, case_id, st.session_state[draft_key])
+            if saved:
+                st.success("Draft saved.")
+            else:
+                st.error("Could not save draft.")
+
+    with col2:
+        if st.button("Publish", use_container_width=True, key=f"publish_case_note_{case_id}"):
+            published = publish_case_note_for_case(user_id, case_id, st.session_state[draft_key])
+            if published:
+                st.success(f"Published version {published.version_number}.")
+            else:
+                st.error("Could not publish note.")
+
+    with col3:
+        if st.button("View History", use_container_width=True, key=f"view_case_note_history_{case_id}"):
+            st.session_state[history_key] = not st.session_state.get(history_key, False)
+
+    if st.session_state.get(history_key):
+        history = get_case_note_history_for_case(user_id, case_id)
+        if not history:
+            st.info("No published versions yet.")
+        else:
+            for version in history:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**Version {version.version_number}** · {version.changed_by_email or version.changed_by_user_id} · {version.created_at.strftime('%d %b %Y, %H:%M')}"
+                    )
+                    st.write(version.note_text)
 
 
 def render_documents_section(case_id: int, documents: list, user_id: int):
@@ -489,6 +541,7 @@ def main():
     documents = case_data["documents"]
     deadlines = case_data["deadlines"]
     remedies = case_data.get("remedies")
+    timeline = case_data.get("timeline", [])
 
     # Keep attachments and deadlines in session for uploader convenience
     st.session_state.setdefault("case_attachments", case_data.get("attachments", []))
@@ -526,7 +579,7 @@ def main():
     st.markdown("---")
 
     # Main content - tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 Timeline", "📄 Documents", "⏰ Deadlines", "⚖️ Remedies"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Timeline", "📄 Documents", "⏰ Deadlines", "⚖️ Remedies", "🗒️ Notes"])
 
     with tab1:
         render_timeline_section(timeline)
@@ -539,6 +592,9 @@ def main():
 
     with tab4:
         render_remedies_section(remedies)
+
+    with tab5:
+        render_case_notes_section(case_id, user_id)
 
     st.markdown("---")
 

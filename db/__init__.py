@@ -10,6 +10,8 @@ from .models import (
     User,
     OTPVerification,
     Case,
+    CaseNote,
+    CaseNoteVersion,
 )
 
 from .crud.notifications import (
@@ -39,6 +41,8 @@ __all__ = [
     "User",
     "OTPVerification",
     "Case",
+    "CaseNote",
+    "CaseNoteVersion",
     "create_case_deadline",
     "get_upcoming_deadlines",
     "get_prefs_by_user_ids",

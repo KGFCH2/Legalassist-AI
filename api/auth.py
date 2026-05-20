@@ -7,9 +7,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 import jwt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer, APIKeyHeader
 import secrets
 import hashlib
+from sqlalchemy.orm import Session
 
 from api.config import get_settings
 from database import SessionLocal, is_token_revoked
@@ -34,6 +35,7 @@ class InvalidTokenError(AuthError):
 settings = get_settings()
 security = HTTPBearer(auto_error=False)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def _get_jwt_secrets_to_try() -> list[str]:
@@ -129,24 +131,6 @@ def verify_token(token: str) -> Dict:
 # API Key Management
 # ============================================================================
 
-class APIKey:
-    """API Key model"""
-    def __init__(self, key_id: str, name: str, key_hash: str, key_salt: str, created_at: datetime, 
-                 expires_at: Optional[datetime] = None):
-        self.key_id = key_id
-        self.name = name
-        self.key_hash = key_hash
-        self.key_salt = key_salt
-        self.created_at = created_at
-        self.expires_at = expires_at
-    
-    def is_valid(self) -> bool:
-        """Check if API key is valid"""
-        if self.expires_at and datetime.now(timezone.utc) > self.expires_at:
-            return False
-        return True
-
-
 def generate_api_key() -> str:
     """Generate a new API key"""
     return secrets.token_urlsafe(32)
@@ -159,34 +143,47 @@ def hash_api_key(key: str, salt: str) -> str:
 
 def verify_api_key(key: str, salt: str, key_hash: str) -> bool:
     """Verify API key against salt and hash"""
-    return hash_api_key(key, salt) == key_hash
+    return secrets.compare_digest(hash_api_key(key, salt), key_hash)
 
 
-def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> tuple[str, APIKey]:
+def create_api_key_record(
+    db: Session,
+    name: str,
+    expires_in_days: Optional[int] = None,
+    user_id: Optional[int] = None
+) -> tuple[str, APIKey]:
     """Create a new API key and its storage record.
 
-    Returns the one-time secret for immediate display plus an APIKey record
-    that contains only the hashed value for persistence.
+    Returns the one-time secret combined with key_id for display,
+    and saves the APIKey record with the hashed secret and user association.
     """
-    key = generate_api_key()
+    secret = generate_api_key()
     salt = secrets.token_hex(16)
-    key_hash = hash_api_key(key, salt)
+    key_hash = hash_api_key(secret, salt)
     created_at = datetime.now(timezone.utc)
     expires_at = None
 
     if expires_in_days:
         expires_at = created_at + timedelta(days=expires_in_days)
 
+    key_id = f"key_{secrets.token_hex(8)}"
     key_record = APIKey(
-        key_id=f"key_{secrets.token_hex(8)}",
+        key_id=key_id,
         name=name,
         key_hash=key_hash,
         key_salt=salt,
+        user_id=user_id,
         created_at=created_at,
         expires_at=expires_at,
     )
 
-    return key, key_record
+    db.add(key_record)
+    db.commit()
+    db.refresh(key_record)
+
+    # Return the combined API key for display/use
+    combined_key = f"{key_id}.{secret}"
+    return combined_key, key_record
 
 
 # ============================================================================
@@ -204,11 +201,12 @@ class CurrentUser:
 async def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
     http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_api_key: Optional[str] = Depends(api_key_header),
 ) -> CurrentUser:
     """Get current authenticated user"""
     
     # Try JWT token first
-    if token:
+    if token and not token.startswith("key_"):
         try:
             payload = verify_token(token)
         except TokenExpiredError:
@@ -245,20 +243,26 @@ async def get_current_user(
     
     # Try API Key from header — look up in database only.
     # Never treat API keys as JWTs; they are opaque secrets validated by hash.
+    api_key = None
     if http_auth:
         api_key = http_auth.credentials
-        key_prefix = "key_"
+    elif x_api_key:
+        api_key = x_api_key
 
-        if not api_key.startswith(key_prefix):
+    if api_key:
+        
+        if "." not in api_key:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key format"
             )
 
+        key_id, secret = api_key.split(".", 1)
+
         db = SessionLocal()
         try:
             key_record = db.query(APIKey).filter(
-                APIKey.key_id == api_key
+                APIKey.key_id == key_id
             ).first()
 
             if not key_record:
@@ -273,6 +277,23 @@ async def get_current_user(
                     detail="API key has expired"
                 )
 
+            if not verify_api_key(secret, key_record.key_salt, key_record.key_hash):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key"
+                )
+
+            # Check if linked to a database user
+            if key_record.user_id:
+                user = db.query(User).filter(User.id == key_record.user_id).first()
+                if user:
+                    return CurrentUser(
+                        user_id=user.id,
+                        email=user.email,
+                        role="admin" if getattr(user, "is_admin", False) else "user"
+                    )
+
+            # Fallback to default API user
             return CurrentUser(
                 user_id=0,
                 email="api_user",
@@ -292,6 +313,7 @@ async def get_current_user(
 async def get_current_user_optional(
     token: Optional[str] = Depends(oauth2_scheme),
     http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_api_key: Optional[str] = Depends(api_key_header),
 ) -> Optional[CurrentUser]:
     """Get current user without raising on missing credentials.
 
@@ -300,11 +322,11 @@ async def get_current_user_optional(
     or insufficient credentials still raise HTTPException so callers do not
     accidentally treat failed authentication as unauthenticated access.
     """
-    if not token and not http_auth:
+    if not token and not http_auth and not x_api_key:
         return None
 
     try:
-        return await get_current_user(token=token, http_auth=http_auth)
+        return await get_current_user(token=token, http_auth=http_auth, x_api_key=x_api_key)
     except HTTPException:
         raise
 

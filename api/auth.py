@@ -185,8 +185,8 @@ def create_api_key_record(
 # ============================================================================
 
 class CurrentUser:
-    """Current authenticated user"""
-    def __init__(self, user_id: int, email: str, role: str = "user"):
+    """Current authenticated user with RBAC role"""
+    def __init__(self, user_id: int, email: str, role: str = "client"):
         self.user_id = int(user_id)
         self.email = email
         self.role = role

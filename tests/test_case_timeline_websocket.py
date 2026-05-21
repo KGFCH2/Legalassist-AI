@@ -17,56 +17,11 @@ from api.auth import AuthError, TokenExpiredError, InvalidTokenError, verify_tok
 from services.timeline_realtime import timeline_realtime_bus
 
 
+from api.websockets.case_timeline import register_case_timeline_endpoint
+
 def _make_test_app():
     app = FastAPI()
-
-    @app.websocket("/ws/cases/{case_id}/timeline")
-    async def websocket_case_timeline_endpoint(
-        websocket: WebSocket,
-        case_id: int,
-        token: str = Query(None),
-    ):
-        auth_token = token
-        requested_protocols = []
-
-        if "sec-websocket-protocol" in websocket.headers:
-            header_val = websocket.headers["sec-websocket-protocol"]
-            requested_protocols = [p.strip() for p in header_val.split(",")]
-            if "access_token" in requested_protocols:
-                idx = requested_protocols.index("access_token")
-                if idx + 1 < len(requested_protocols):
-                    auth_token = requested_protocols[idx + 1]
-
-        if not auth_token:
-            await websocket.close(code=4001, reason="Authentication required")
-            return
-
-        try:
-            payload = _verify_token(auth_token)
-            user_id = payload.get("sub")
-            if not user_id:
-                await websocket.close(code=4003, reason="Invalid token")
-                return
-        except (TokenExpiredError, InvalidTokenError, AuthError):
-            await websocket.close(code=4001, reason="Invalid or expired token")
-            return
-
-        subprotocol = "access_token" if "access_token" in requested_protocols else None
-        await websocket.accept(subprotocol=subprotocol)
-
-        await websocket.send_json({"type": "subscribed", "case_id": case_id})
-
-        queue = await timeline_realtime_bus.subscribe(case_id)
-        try:
-            import json
-
-            while True:
-                raw = await queue.get()
-                payload_obj = json.loads(raw)
-                await websocket.send_json(payload_obj)
-        finally:
-            await timeline_realtime_bus.unsubscribe(case_id, queue)
-
+    register_case_timeline_endpoint(app)
     return app
 
 

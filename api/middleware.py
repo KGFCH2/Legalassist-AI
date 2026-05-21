@@ -45,6 +45,11 @@ except Exception:
     clear_rls_context = None
     _is_postgres = False
 
+try:
+    from api.csrf import validate_csrf as _csrf_validate
+except Exception:
+    _csrf_validate = None
+
 settings = get_settings()
 logger = structlog.get_logger(__name__)
 http_idempotency_manager = IdempotencyManager()
@@ -414,6 +419,18 @@ async def logging_middleware(request: Request, call_next: Callable):
     if apply_rls_context and _is_postgres and user_id_attr not in (None, "anonymous", ""):
         request.state.db_rls_user_id = user_id_attr
 
+    if _csrf_validate and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        try:
+            user_id_int = int(user_id_attr) if str(user_id_attr).isdigit() else None
+            if user_id_int:
+                _csrf_validate(request, current_user_id=user_id_int, allowed_hosts=None)
+        except Exception as exc:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=403,
+                content={"detail": getattr(exc, "detail", "CSRF validation failed")},
+            )
+
     response = None
     error_occurred = False
 
@@ -545,40 +562,6 @@ async def request_size_limit_middleware(request: Request, call_next: Callable):
                     f"Request body too large: {round(content_length_bytes / 1024 / 1024, 2)} MB "
                     f"(max {round(max_size / 1024 / 1024, 2)} MB)"
                 ),
-            },
-        )
-
-        # If Content-Length present, ensure it matches what we actually read
-        if content_length_bytes is not None and content_length_bytes != len(received):
-            # For upload endpoints, reject mismatch strictly. For others, log and reject.
-            logger.warning(
-                "content_length_mismatch",
-                path=request.url.path,
-                header_length=content_length_bytes,
-                actual_length=len(received),
-            )
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "error_code": "CONTENT_LENGTH_MISMATCH",
-                    "message": "Content-Length header does not match actual body size.",
-                },
-            )
-
-        # Recreate request with the read body for downstream consumers
-        body_bytes = bytes(received)
-
-        async def _receive() -> dict:
-            return {"type": "http.request", "body": body_bytes, "more_body": False}
-
-        new_request = Request(request.scope, _receive)
-        return await call_next(new_request)
-    except PayloadTooLargeError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error_code": "PAYLOAD_TOO_LARGE",
-                "message": str(exc.detail),
             },
         )
 

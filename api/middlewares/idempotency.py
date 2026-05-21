@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import hashlib
 from hashlib import sha256
 from typing import Callable
@@ -124,22 +123,6 @@ def _response_headers_for_cache(response: Response) -> dict:
     return headers
 
 
-def _canonicalize_request_body(body: bytes, content_type: str) -> bytes:
-    if "application/json" not in content_type.lower():
-        return body or b""
-
-    if not body:
-        return b""
-
-    try:
-        parsed = json.loads(body.decode("utf-8"))
-    except Exception:
-        return body
-
-    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return canonical.encode("utf-8")
-
-
 async def idempotency_middleware(request: Request, call_next: Callable):
     if request.method.upper() not in IDEMPOTENT_METHODS or _idempotency_exempt_path(request.url.path):
         return await call_next(request)
@@ -155,15 +138,14 @@ async def idempotency_middleware(request: Request, call_next: Callable):
         )
 
     body = await request.body()
-    canonical_body = _canonicalize_request_body(body, request.headers.get("content-type", ""))
-    body_fingerprint = hashlib.sha256(canonical_body or b"").hexdigest()
+    body_fingerprint = hashlib.sha256(body or b"").hexdigest()
     principal = _request_principal(request)
     key = http_idempotency_manager.build_http_key(
         method=request.method,
         path=request.url.path,
         idempotency_key=idempotency_key,
         principal=principal,
-        body_fingerprint=body_fingerprint,
+        body=body,
     )
 
     cached = http_idempotency_manager.get_http_response(key)

@@ -9,7 +9,7 @@ from core.timeline_payloads import TimelineEventPayload
 
 @dataclass
 class _CaseChannel:
-    connections: Set["asyncio.Queue[Dict[str, Any]]"] = field(default_factory=set)
+    connections: Set[tuple["asyncio.Queue[Dict[str, Any]]", asyncio.AbstractEventLoop]] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -35,8 +35,9 @@ class TimelineRealtimeBus:
     async def subscribe(self, case_id: int) -> asyncio.Queue[Dict[str, Any]]:
         channel = await self._get_or_create_channel(case_id)
         q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
         async with channel.lock:
-            channel.connections.add(q)
+            channel.connections.add((q, loop))
         return q
 
     async def unsubscribe(self, case_id: int, q: asyncio.Queue[Dict[str, Any]]) -> None:
@@ -45,7 +46,7 @@ class TimelineRealtimeBus:
             if channel is None:
                 return
         async with channel.lock:
-            channel.connections.discard(q)
+            channel.connections = {subscriber for subscriber in channel.connections if subscriber[0] is not q}
             if not channel.connections:
                 async with self._global_lock:
                     if self._channels.get(case_id) is channel:
@@ -63,12 +64,15 @@ class TimelineRealtimeBus:
             targets = list(channel.connections)
 
         # fan-out outside lock
-        for q in targets:
-            try:
-                q.put_nowait(message)
-            except asyncio.QueueFull:
-                # drop message for that slow consumer
-                pass
+        for q, loop in targets:
+            def _deliver() -> None:
+                try:
+                    q.put_nowait(message)
+                except asyncio.QueueFull:
+                    # drop message for that slow consumer
+                    pass
+
+            loop.call_soon_threadsafe(_deliver)
 
 
 timeline_realtime_bus = TimelineRealtimeBus()

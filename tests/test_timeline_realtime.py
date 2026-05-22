@@ -58,6 +58,24 @@ def test_publish_normalizes_datetimes_to_utc_iso():
 
         payload = await queue.get()
         validated = TimelineEventPayload.model_validate(payload)
+        assert set(TimelineEventPayload.model_fields) == {
+            "type",
+            "case_id",
+            "event_type",
+            "description",
+            "timestamp",
+            "metadata",
+            "event_id",
+        }
+        assert set(validated.model_dump(mode="json")) == {
+            "type",
+            "case_id",
+            "event_type",
+            "description",
+            "timestamp",
+            "metadata",
+            "event_id",
+        }
         assert validated.type == "timeline_event"
         assert validated.case_id == 7
         assert validated.event_type == "deadline_created"
@@ -67,6 +85,22 @@ def test_publish_normalizes_datetimes_to_utc_iso():
         assert validated.model_dump(mode="json")["metadata"]["nested_timestamp"] == "2026-05-22T10:31:00+00:00"
 
     asyncio.run(scenario())
+
+
+def test_timeline_event_payload_rejects_extra_fields():
+    with pytest.raises(ValidationError):
+        TimelineEventPayload.model_validate(
+            {
+                "type": "timeline_event",
+                "case_id": 7,
+                "event_type": "deadline_created",
+                "description": "Manual deadline added",
+                "timestamp": datetime(2026, 5, 22, 10, 30, tzinfo=timezone.utc),
+                "metadata": {},
+                "event_id": 555,
+                "unexpected": "value",
+            }
+        )
 
 
 def test_publish_rejects_invalid_payload_shape():

@@ -215,7 +215,7 @@ def send_otp_email(email: str, otp: str) -> bool:
             logger.debug("otp_delivery_debug_mode", recipient=mask_email(email), transport="sendgrid")
  main
         else:
-            logger.warning("otp_delivery_failed", recipient=mask_email(email))
+        logger.warning("otp_delivery_failed", recipient=mask_email(email))
         return False
 
 

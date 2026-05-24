@@ -601,6 +601,8 @@ def init_auth_session():
         st.session_state.is_authenticated = False
     if "session_created_at" not in st.session_state:
         st.session_state.session_created_at = None
+    if "session_nonce" not in st.session_state:
+        st.session_state.session_nonce = None
 
 
 def validate_auth_state() -> bool:
@@ -647,6 +649,7 @@ def clear_auth_session():
     st.session_state.user_id = None
     st.session_state.is_authenticated = False
     st.session_state.session_created_at = None
+    st.session_state.session_nonce = None
 
 
 def force_logout_all_tabs():
@@ -658,6 +661,7 @@ def force_logout_all_tabs():
     st.session_state.user_email = None
     st.session_state.user_id = None
     st.session_state.is_authenticated = False
+    st.session_state.session_nonce = None
 
 
 def login_user(email: str) -> bool:
@@ -693,6 +697,9 @@ def verify_login(otp: str) -> bool:
     success, message, token = verify_otp_and_create_token(email, otp)
 
     if success and token:
+        # Regenerate session: wipe any pre-authentication state to prevent
+        # session fixation, then repopulate with fresh authenticated state.
+        st.session_state.clear()
         st.session_state.user_token = token
         st.session_state.user_email = email
 
@@ -702,8 +709,7 @@ def verify_login(otp: str) -> bool:
             st.session_state.user_id = payload.get("sub", payload.get("user_id"))
 
         st.session_state.is_authenticated = True
-        st.session_state.pending_email = None
-        st.session_state.otp_sent = False
+        st.session_state.session_nonce = secrets.token_hex(16)
 
         return True
 

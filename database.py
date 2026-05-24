@@ -173,6 +173,22 @@ else:
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 from db.base import Base
+from db.models.auth import User, OTPVerification
+from db.models.analytics import (
+    CaseRecord, CaseOutcome, CaseAnalytics,
+    ModelFeedback, ModelPerformance, ModelRoutingRule, SimilarityFeedback,
+    CaseEmbedding, CaseIssue, CaseArgument, KnowledgeGraphEdge, PrecedentMatch, RevokedToken,
+)
+from db.models.cases import (
+    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote,
+)
+from db.models.notifications import (
+    NotificationStatus, NotificationChannel, UserPreference, NotificationTemplate, NotificationLog,
+)
+from db.models.feedback import UserFeedback
+from db.models.reports import Report
+from db.models.audit import AuditEvent
+from db.models.knowledge import KnowledgeInvalidation
 
 logger = logging.getLogger(__name__)
 
@@ -968,6 +984,8 @@ class CasePresence(Base):
     last_seen = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+<<<<<<< HEAD
+=======
 
     case = relationship("Case", back_populates="presence_updates")
     user = relationship("User", back_populates="case_presence")
@@ -1150,6 +1168,7 @@ class PrecedentMatch(Base):
         return f"<PrecedentMatch(query={self.query_case_id}, precedent={self.precedent_case_id}, type={self.match_type})>"
 
 
+>>>>>>> upstream
 # Database initialization
 def init_db():
     """Create all tables"""

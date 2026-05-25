@@ -5,7 +5,7 @@ if os.path.exists(path):
 
 content = """# LegalAssist AI - Streamlit Secrets Configuration
 
-OPENROUTER_API_KEY = "test_key"
+OPENROUTER_API_KEY = ""
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
@@ -16,7 +16,7 @@ TWILIO_FROM_NUMBER = ""
 SENDGRID_API_KEY = ""
 SENDGRID_FROM_EMAIL = ""
 
-JWT_SECRET = "test_secret_key_do_not_use_in_production"
+JWT_SECRET = ""
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 """

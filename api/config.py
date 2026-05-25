@@ -34,7 +34,14 @@ class APISettings(BaseSettings):
     
     # Authentication
     AUTH_ENABLED: bool = True
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    # Prefer externally managed secrets; fall back to environment for local dev
+    try:
+        from utils.secret_manager import get_secret
+        _jwt_from_vault = get_secret("jwt_secret")
+    except Exception:
+        _jwt_from_vault = None
+
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", _jwt_from_vault or "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     API_KEY_HEADER: str = "X-API-Key"

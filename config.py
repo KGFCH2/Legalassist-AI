@@ -122,16 +122,25 @@ class Config:
         Raises:
             RuntimeError: If JWT_SECRET is not configured in environment variables.
         """
+        # Try environment / streamlit secrets first
         secret = str(_get_val("JWT_SECRET", "")).strip()
         if secret:
             return secret
-        
+
+        # Try central secret manager (Vault or env fallback)
+        try:
+            from utils.secret_manager import get_secret
+            vault_secret = get_secret("jwt_secret")
+            if vault_secret:
+                return str(vault_secret).strip()
+        except Exception:
+            pass
+
         env_name = cls.APP_ENV.upper()
         raise RuntimeError(
             f"JWT_SECRET is not configured for the {env_name} environment. "
             "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
-            "environment variable. Consider using AWS Secrets Manager or HashiCorp Vault "
-            "for production secret management."
+            "environment variable or a configured Vault."
         )
 
     # --- Notification Settings (SMS) ---
@@ -141,7 +150,13 @@ class Config:
     @classmethod
     def get_twilio_auth_token(cls) -> str:
         """Return the Twilio auth token, retrieved on demand to limit exposure."""
-        return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+        # Prefer centralized secret manager
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("twilio_auth_token") or _get_val("TWILIO_AUTH_TOKEN", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
 
     # --- Notification Settings (Email) ---
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
@@ -149,7 +164,12 @@ class Config:
     @classmethod
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
-        return str(_get_val("SENDGRID_API_KEY", "") or "")
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("sendgrid_api_key") or _get_val("SENDGRID_API_KEY", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("SENDGRID_API_KEY", "") or "")
 
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")

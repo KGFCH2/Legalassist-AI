@@ -185,11 +185,14 @@ class APISettings(BaseSettings):
         origins = self.CORS_ORIGINS
         if isinstance(origins, list) and "*" in origins:
             import logging as _log
-            _log.warning(
+            msg = (
                 "CORS configured with wildcard origin '*' and allow_credentials=True. "
                 "This allows any website to make credentialed requests. "
                 "Set explicit origins in production."
             )
+            if is_prod:
+                raise RuntimeError(msg)
+            _log.warning(msg)
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
 

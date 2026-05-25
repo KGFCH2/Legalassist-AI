@@ -16,9 +16,14 @@ from fastapi import status
 import structlog
 
 from api.config import get_settings
-from api.middlewares import register_middlewares
-from api.csrf import CSRFProtectionMiddleware
-from api.limiter import cleanup_limiter, enforce_rate_limit, RateLimitExceeded
+from api.middleware import (
+    rate_limit_middleware,
+    add_correlation_id_middleware,
+    error_handling_middleware,
+    logging_middleware,
+    request_size_limit_middleware
+)
+from api.idempotency_middleware import idempotency_middleware
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
 
@@ -174,17 +179,19 @@ def create_app() -> FastAPI:
     
     # Initialize validation config from settings
     ValidationConfig.from_settings(settings)
-
-    # Add middleware through a single registration entry to preserve order.
-    register_middlewares(app)
-
-    if _GRAPHQL_ROUTER is not None:
-        app.include_router(
-            _GRAPHQL_ROUTER(_GRAPHQL_SCHEMA, path="/graphql", graphiql=True),
-            prefix="",
-        )
-
-# ========================================================================
+    
+    # Add middleware
+    app.middleware("http")(request_size_limit_middleware)
+    # Idempotency middleware should run early for POST/PUT/PATCH/DELETE
+    app.middleware("http")(idempotency_middleware)
+    app.middleware("http")(add_correlation_id_middleware)
+    app.middleware("http")(logging_middleware)
+    app.middleware("http")(error_handling_middleware)
+    
+    if settings.RATE_LIMIT_ENABLED:
+        app.middleware("http")(rate_limit_middleware)
+    
+    # ========================================================================
     # Include Routers
     # ========================================================================
     

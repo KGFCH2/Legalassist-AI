@@ -8,6 +8,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi import status
+import logging
 import structlog
 
 from api.config import get_settings
@@ -38,10 +39,21 @@ logger = structlog.get_logger(__name__)
 # Middleware Configuration
 # ============================================================================
 
+# Force explicit origins when credentials are enabled — never allow *
+_origins = settings.CORS_ORIGINS
+if isinstance(_origins, list) and "*" in _origins:
+    sanitized = [o for o in _origins if o != "*"]
+    logging.getLogger(__name__).warning(
+        "Removed wildcard '*' from CORS_ORIGINS because allow_credentials=True. "
+        "Explicit origins required: %s",
+        sanitized or None,
+    )
+    _origins = sanitized or ["http://localhost:8080"]
+
 middleware = [
     Middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
+        allow_origins=_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

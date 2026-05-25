@@ -207,6 +207,26 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
     multi-modal OCR processor when OCR is enabled.
     """
     text = ""
+    parser_errors: List[str] = []
+
+    # Read input bytes early and perform lightweight safety checks
+    data = _read_input_bytes(uploaded_pdf)
+    if data is None:
+        raise ValueError("Unable to read uploaded file bytes.")
+
+    # File size protection
+    max_bytes = int(getattr(Config, 'MAX_FILE_SIZE_MB', 25)) * 1024 * 1024
+    if len(data) > max_bytes:
+        raise PDFProcessingError(f"PDF exceeds allowed size of {max_bytes} bytes.")
+
+    # Reject obvious malicious tokens (JavaScript, Launch actions, embedded files)
+    suspicious_signatures = [b'/JavaScript', b'/JS', b'/Launch', b'/EmbeddedFiles', b'/RichMedia', b'/OpenAction', b'/AA']
+    for sig in suspicious_signatures:
+        if sig in data:
+            parser_errors.append(f"Suspicious PDF token detected: {sig.decode('latin1')}")
+            # For safety, refuse to process PDFs containing active content
+            raise PDFProcessingError("PDF contains active or embedded content (JavaScript/Launch/EmbeddedFiles). Processing aborted.")
+
     if _is_image_input(uploaded_pdf):
         if not enable_ocr:
             raise ValueError("Image uploads require OCR. Re-run with OCR enabled.")
@@ -221,10 +241,19 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
             return _legacy_image_ocr_fallback(image_bytes, ocr_languages)
 
     try:
-        with pdfplumber.open(uploaded_pdf) as pdf:
+        import io as _io
+        with pdfplumber.open(_io.BytesIO(data)) as pdf:
             pages = []
-            for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+            max_pages = int(getattr(Config, 'PDF_MAX_PAGES', 2000))
+            for i, page in enumerate(pdf.pages):
+                if i >= max_pages:
+                    parser_errors.append(f"PDF page limit reached: {max_pages}")
+                    break
+                try:
+                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                except Exception as e:
+                    parser_errors.append(f"pdfplumber page extraction error page={i}: {e}")
+                    continue
                 if page_text:
                     pages.append(page_text)
             text = "\n".join(pages).strip()
@@ -233,27 +262,38 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
                 is_valid, quality = _validate_encoding_quality(text)
                 if is_valid:
                     return text
-    except Exception:
-        pass
+    except Exception as e:
+        parser_errors.append(f"pdfplumber open error: {e}")
 
     try:
-        if hasattr(uploaded_pdf, "seek"):
-            uploaded_pdf.seek(0)
-        reader = PdfReader(uploaded_pdf)
+        import io as _io
+        reader = PdfReader(_io.BytesIO(data), strict=False)
+        # Check for encryption
+        try:
+            if getattr(reader, 'is_encrypted', False):
+                # Try simple decryption
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    parser_errors.append("Encrypted PDF cannot be processed.")
+                    raise PDFProcessingError("Encrypted PDF not supported.")
+        except Exception:
+            # continue; some pypdf versions may not expose is_encrypted
+            pass
+
         text = _extract_pages_pypdf(reader)
         if text:
-            # Validate encoding quality before returning
             is_valid, quality = _validate_encoding_quality(text)
             if is_valid:
                 return text
-    except Exception:
-        pass
+    except Exception as e:
+        parser_errors.append(f"pypdf read error: {e}")
 
     if not enable_ocr:
         if parser_errors:
             raise PDFProcessingError(
                 "Failed to extract text from PDF using pdfplumber and pypdf.",
-                parser_errors[-1],
+                "; ".join(parser_errors),
             )
         raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
 

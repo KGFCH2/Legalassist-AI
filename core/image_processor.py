@@ -319,7 +319,7 @@ class ImageProcessor:
                 # Try Otsu first, fallback to adaptive
                 try:
                     processed = ImageProcessor.binarize_image(processed, method='otsu')
-                except:
+                except Exception:
                     processed = ImageProcessor.binarize_image(processed, method='adaptive')
             
             # Sharpen if aggressive

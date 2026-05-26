@@ -1,5 +1,10 @@
 """API routes for audio transcription (voice-to-text)."""
 import base64
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from core.speech_transcription import TranscriptionEngine
+from api.auth import get_current_user, CurrentUser
+from api.validation import decode_base64_safe
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException

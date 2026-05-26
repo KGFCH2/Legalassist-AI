@@ -65,6 +65,7 @@ class TimelineRealtimeBus:
             self._dropped_messages_total += 1
             total_dropped = self._dropped_messages_total
             channel.dropped_messages += 1
+            case_dropped = channel.dropped_messages
 
         logger.warning(
             "timeline_realtime_queue_dropped",
@@ -72,7 +73,7 @@ class TimelineRealtimeBus:
             queue_maxsize=self._queue_maxsize,
             dropped_messages=1,
             total_dropped_messages=total_dropped,
-            case_dropped_messages=channel.dropped_messages,
+            case_dropped_messages=case_dropped,
             policy="drop_oldest_keep_latest",
         )
 

@@ -2,10 +2,12 @@ import io
 from pypdf import PdfReader
 import pdfplumber
 import re
+import json
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
 from datetime import datetime
+from config import Config
 
 # Custom Exception Imports
 from core.exceptions import (
@@ -34,6 +36,17 @@ DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 # PDF DATA EXTRACTION (OCR & PARSING)
 # =============================================================================
 
+def _resolve_safe_pdf_path(pdf_input: Union[str, Path]) -> Path:
+    """Resolve and validate that a PDF path is within the allowed attachments directory."""
+    path = Path(pdf_input)
+    resolved = path.resolve(strict=False)
+    allowed = Path(Config.ATTACHMENTS_DIR).resolve()
+    if not resolved.is_relative_to(allowed):
+        LOGGER.warning("blocked_arbitrary_file_read", path=str(resolved), allowed=str(allowed))
+        raise InputReadingError("File path is not within the allowed attachments directory")
+    return resolved
+
+
 def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> bytes:
     """
     Safely reads PDF content into a byte stream.
@@ -49,8 +62,11 @@ def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> bytes:
     """
     if isinstance(pdf_input, (str, Path)):
         try:
-            with open(pdf_input, "rb") as f:
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            with open(resolved, "rb") as f:
                 return f.read()
+        except InputReadingError:
+            raise
         except Exception as e:
             raise InputReadingError(f"Failed to read PDF file at {pdf_input}", e)
 
@@ -179,7 +195,7 @@ def extract_text_with_diagnostics(
     # 1. Try pdfplumber (more robust for complex layouts).
     try:
         if isinstance(pdf_input, (str, Path)):
-            pdfplumber_input = pdf_input
+            pdfplumber_input = _resolve_safe_pdf_path(pdf_input)
         else:
             # _read_pdf_bytes now raises InputReadingError
             raw_bytes = _read_pdf_bytes(pdf_input)
@@ -206,7 +222,8 @@ def extract_text_with_diagnostics(
     # 2. Fallback to pypdf
     try:
         if isinstance(pdf_input, (str, Path)):
-            with open(pdf_input, "rb") as f:
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            with open(resolved, "rb") as f:
                 reader = PdfReader(f)
                 text = _extract_pages_pypdf(reader)
         else:
@@ -241,7 +258,8 @@ def extract_text_with_diagnostics(
     try:
         images = []
         if isinstance(pdf_input, (str, Path)):
-            images = convert_from_path(str(pdf_input), dpi=ocr_dpi)
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            images = convert_from_path(str(resolved), dpi=ocr_dpi)
         else:
             data = _read_pdf_bytes(pdf_input)
             images = convert_from_bytes(data, dpi=ocr_dpi)
@@ -380,6 +398,20 @@ def compress_text(text: str, limit: int = 6000) -> str:
 
     return head.strip() + "\n\n... [TRUNCATED] ...\n\n" + tail.strip()
 
+
+def parse_llm_json(raw_text: str) -> Dict[str, Any]:
+    try:
+        # Strip markdown code blocks if the AI adds them
+        clean_json = raw_text.replace("```json", "").replace("
+```", "").strip()
+        return json.loads(clean_json)
+    except:
+        return {
+            "summary": raw_text, 
+            "confidence_score": 0.3, 
+            "explanation": "Could not parse metadata. Please verify details manually."
+        }
+
 # -----------------------------
 # Detect English leakage
 # -----------------------------
@@ -394,25 +426,17 @@ def english_leakage_detected(output_text: str, threshold: int = 5) -> bool:
 # -----------------------------
 def build_summary_prompt(safe_text: str, language: str) -> str:
     return f"""
-You are LegalEase AI — an expert judicial-simplification and translation engine.
-
-MISSION:
-Convert the judgment text into a simple, citizen-friendly summary.
-
-INSTRUCTIONS:
-1. Extract ONLY the final judgment outcome.
-2. Remove all legal jargon and case history.
-3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
-4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
-5. Each bullet must be 1–2 very short sentences.
-6. Put every bullet point on its own new line.
-7. No extra headings. No disclaimers.
+You are LegalEase AI. Convert the judgment text into a simple summary.
+OUTPUT FORMAT: You MUST return a valid JSON object ONLY. Do not output anything else.
+{{
+  "summary": "5+ bullet points in {language}",
+  "key_entities": ["List of extracted entities like Acts, Dates, Names"],
+  "confidence_score": 0.0 to 1.0,
+  "explanation": "Explain why this summary is reliable."
+}}
 
 TEXT TO ANALYZE:
 {safe_text}
-
-OUTPUT REQUIRED:
-- Minimum 5 bullet points in {language} only
 """
 
 def build_retry_prompt(safe_text: str, language: str) -> str:

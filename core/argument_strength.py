@@ -30,7 +30,8 @@ def score_argument(text: str, metadata: Dict = None) -> Dict:
     # Logical structure heuristics: connective words indicating cause/conclusion
     logical_connectors = ["therefore", "thus", "hence", "because", "since", "so", "consequently"]
     logical_marks = _count_keywords(text, logical_connectors)
-    logical_score = min(1.0, logical_marks / max(1, num_sentences * 0.5))
+    divisor = max(1.0, num_sentences * 0.5)
+    logical_score = min(1.0, max(0.0, logical_marks / divisor))
 
     # Evidence quality: explicit mentions of exhibits, witnesses, documents, numbers
     evidence_keywords = ["exhibit", "evidence", "witness", "affidavit", "document", "report"]

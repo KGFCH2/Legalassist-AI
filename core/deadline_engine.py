@@ -21,6 +21,26 @@ def _parse_date(value: Any, tz: str) -> datetime:
     return dt
 
 
+COURT_HOLIDAYS = {
+    "IN_SC": [
+        "2026-01-26",  # Republic Day
+        "2026-03-03",  # Holi
+        "2026-08-15",  # Independence Day
+        "2026-10-02",  # Gandhi Jayanti
+        "2026-11-08",  # Diwali
+        "2026-12-25",  # Christmas
+    ],
+    "IN_DHC": [
+        "2026-01-26",
+        "2026-03-03",
+        "2026-08-15",
+        "2026-10-02",
+        "2026-11-08",
+        "2026-12-25",
+    ],
+}
+
+
 def _is_weekend(dt: date) -> bool:
     return dt.weekday() >= 5
 
@@ -49,14 +69,15 @@ def calculate_deadline(
     dt = _parse_date(start, tz)
 
     holidays_set = set(holidays or [])
+    if jurisdiction:
+        for h in COURT_HOLIDAYS.get(jurisdiction.upper(), []):
+            holidays_set.add(h)
 
     remaining = max(0, int(business_days))
     current = dt
 
-    # If business_days is zero, deadline is same day but still may be adjusted
     steps = 0
     while remaining > 0:
-        # move to next day at same local wall clock
         current = current + timedelta(days=1)
         steps += 1
         d = current.date()
@@ -68,6 +89,11 @@ def calculate_deadline(
             continue
 
         remaining -= 1
+
+    # Ensure the calculated final date itself is not a weekend or holiday
+    while (exclude_weekends and _is_weekend(current.date())) or (current.date().isoformat() in holidays_set):
+        current = current + timedelta(days=1)
+        steps += 1
 
     adjusted_for_weekends_holidays = current
 
@@ -89,6 +115,10 @@ def calculate_deadline(
                 jurisdiction_adjustment = 0
 
     final = adjusted_for_weekends_holidays + timedelta(days=jurisdiction_adjustment + int(emergency_extension_days))
+
+    # Recheck if the final date with adjustments lands on a holiday/weekend
+    while (exclude_weekends and _is_weekend(final.date())) or (final.date().isoformat() in holidays_set):
+        final = final + timedelta(days=1)
 
     return {
         "deadline": final.isoformat(),

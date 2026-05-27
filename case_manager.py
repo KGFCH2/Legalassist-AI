@@ -1129,3 +1129,8 @@ def delete_user_cases(user_id: int, case_ids: List[int], confirm: bool = False) 
 # =============================================================================
 # END OF SERVICE
 # =============================================================================
+
+
+def validate_case_id(case_id):
+    """Validates the format of a given case ID."""
+    return isinstance(case_id, str) and len(case_id) > 0

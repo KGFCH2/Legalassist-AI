@@ -53,6 +53,7 @@ def client(test_db):
     app.include_router(cases_route.router)
     app.dependency_overrides[get_current_user] = lambda: CurrentUser("42", "tester@example.com", "user")
     app.dependency_overrides[cases_route.get_db] = lambda: test_db
+    app.dependency_overrides[cases_route.get_db_rls] = lambda: test_db
     return TestClient(app)
 
 

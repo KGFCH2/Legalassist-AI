@@ -96,6 +96,8 @@ class Case(Base):
     notes = relationship("CaseNote", back_populates="case", cascade="all, delete-orphan")
     attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan")
     anonymized_share_tokens = relationship("AnonymizedShareToken", back_populates="case", cascade="all, delete-orphan")
+    comments = relationship("CaseComment", back_populates="case", cascade="all, delete-orphan", order_by="CaseComment.created_at")
+    presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
 
 
 class CaseDocument(Base):
@@ -205,3 +207,40 @@ class AnonymizedShareToken(Base):
     used_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     case = relationship("Case", back_populates="anonymized_share_tokens")
+
+
+class CaseComment(Base):
+    """Threaded collaboration comment attached to a case."""
+    __tablename__ = "case_comments"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_comment_id = Column(Integer, ForeignKey("case_comments.id", ondelete="CASCADE"), nullable=True, index=True)
+    comment_text = Column(Text, nullable=False)
+    is_resolved = Column(Boolean, default=False, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    case = relationship("Case", back_populates="comments")
+    user = relationship("db.models.auth.User", back_populates="case_comments")
+    parent_comment = relationship("CaseComment", remote_side=[id], back_populates="replies")
+    replies = relationship("CaseComment", back_populates="parent_comment", cascade="all, delete-orphan")
+
+
+class CasePresence(Base):
+    """Tracks recently active collaborators on a case."""
+    __tablename__ = "case_presence"
+    __table_args__ = (UniqueConstraint("case_id", "user_id", name="uq_case_presence_user"),)
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    active_view = Column(String(255), nullable=True)
+    cursor_anchor = Column(String(255), nullable=True)
+    last_seen = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    case = relationship("Case", back_populates="presence_updates")
+    user = relationship("db.models.auth.User", back_populates="case_presence")

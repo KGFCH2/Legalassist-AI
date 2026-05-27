@@ -646,7 +646,7 @@ def setup_scheduler(scheduler_class):
         else:
             logger.info("scheduler_maintenance_job_disabled")
         
-        logger.info("scheduler_configured", scheduler_class=scheduler_class.__name__, job_store="sqlalchemy")
+        logger.info("scheduler_configured", scheduler_class=getattr(scheduler_class, "__name__", str(scheduler_class)), job_store="sqlalchemy")
         
         return scheduler
         

@@ -28,6 +28,8 @@ class User(Base):
 
     cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
     preferences = relationship("db.models.notifications.UserPreference", back_populates="user", cascade="all, delete-orphan")
+    case_comments = relationship("db.models.cases.CaseComment", back_populates="user", cascade="all, delete-orphan")
+    case_presence = relationship("db.models.cases.CasePresence", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self) -> dict:
         return {

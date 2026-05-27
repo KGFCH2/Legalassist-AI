@@ -44,6 +44,7 @@ from database import (
     Attachment,
     AnonymizedShareToken,
     get_db,
+    SimilarityFeedback,
 )
 from api.dependencies import get_db_rls
 from db.case_service import save_case_note_draft, publish_case_note, get_case_note_history
@@ -274,6 +275,23 @@ async def search_cases(
             search_time_seconds=round(perf_counter() - start, 4),
         )
 
+    # Pre-fetch all SimilarityFeedback rows for candidate IDs in a single query to avoid N+1 queries.
+    candidate_ids = [c.id for c in candidates if c.id != reference_case.id]
+    prefetched_feedbacks = []
+    if candidate_ids:
+        fb_query = db.query(SimilarityFeedback).filter(
+            SimilarityFeedback.candidate_case_id.in_(candidate_ids)
+        )
+        if current_user.user_id is not None:
+            fb_query = fb_query.filter(SimilarityFeedback.user_id == str(current_user.user_id))
+        if query_signature is not None:
+            fb_query = fb_query.filter(SimilarityFeedback.query_signature == query_signature)
+        prefetched_feedbacks = fb_query.all()
+
+    feedback_by_case_id = {}
+    for fb in prefetched_feedbacks:
+        feedback_by_case_id.setdefault(fb.candidate_case_id, []).append(fb)
+
     # Score candidates and apply threshold
     scored = []
     for c in candidates:
@@ -297,6 +315,7 @@ async def search_cases(
             c,
             user_id=current_user.user_id,
             query_signature=query_signature,
+            prefetched_feedback=feedback_by_case_id.get(c.id),
         )
         score01 = min(1.0, score01 + recency_boost + feedback_boost)
 

@@ -662,6 +662,7 @@ class CaseSimilarityCalculator:
         candidate_case: CaseRecord,
         user_id: Optional[str] = None,
         query_signature: Optional[str] = None,
+        prefetched_feedback: Optional[List[SimilarityFeedback]] = None,
     ) -> float:
         """Return a small ranking adjustment from similarity feedback.
 
@@ -674,20 +675,30 @@ class CaseSimilarityCalculator:
             candidate_case: Case being ranked.
             user_id: Optional user scope for feedback rows.
             query_signature: Optional query signature scope for feedback rows.
+            prefetched_feedback: Optional pre-fetched feedback list for this candidate.
 
         Returns:
             A bounded adjustment in the range ``[-0.03, 0.03]``.
         """
-        query = db.query(SimilarityFeedback).filter(
-            SimilarityFeedback.candidate_case_id == candidate_case.id,
-        )
+        if prefetched_feedback is not None:
+            feedback_rows = prefetched_feedback
+            if user_id is not None:
+                feedback_rows = [row for row in feedback_rows if row.user_id == str(user_id)]
+            if query_signature is not None:
+                feedback_rows = [row for row in feedback_rows if row.query_signature == query_signature]
+            feedback_rows = feedback_rows[:50]
+        else:
+            query = db.query(SimilarityFeedback).filter(
+                SimilarityFeedback.candidate_case_id == candidate_case.id,
+            )
 
-        if user_id is not None:
-            query = query.filter(SimilarityFeedback.user_id == str(user_id))
-        if query_signature is not None:
-            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+            if user_id is not None:
+                query = query.filter(SimilarityFeedback.user_id == str(user_id))
+            if query_signature is not None:
+                query = query.filter(SimilarityFeedback.query_signature == query_signature)
 
-        feedback_rows = query.limit(50).all()
+            feedback_rows = query.limit(50).all()
+
         if not feedback_rows:
             return 0.0
 

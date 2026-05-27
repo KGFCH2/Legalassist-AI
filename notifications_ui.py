@@ -691,3 +691,8 @@ if __name__ == "__main__":
         page_notification_history()
     elif page == "Preferences":
         page_notification_preferences()
+
+
+def format_notification_message(msg):
+    """Formats a notification message for display."""
+    return msg.strip().capitalize()

@@ -57,7 +57,12 @@ def calculate_deadline(
     steps = 0
     while remaining > 0:
         # move to next day at same local wall clock
+        # Adjust for possible DST/timezone shifts by normalizing to midnight if hour mismatch occurs
+        prev_hour = current.hour
         current = current + timedelta(days=1)
+        if current.hour != prev_hour:
+            # Shifted by DST transition, normalize back to the matching hour to keep wall clock stable
+            current = current.replace(hour=prev_hour)
         steps += 1
         d = current.date()
 

@@ -53,51 +53,78 @@ class EncryptedPayload:
         return json.dumps(self.to_dict())
 
 
-def derive_key(passphrase: str, salt: bytes) -> bytes:
-    return hashlib.pbkdf2_hmac(
-        "sha256",
-        passphrase.encode("utf-8"),
-        salt,
-        PBKDF2_ITERATIONS,
-        dklen=KEY_SIZE,
-    )
+def zero_buffer(buf: bytearray | bytes) -> None:
+    """Overwrites the content of a bytearray with zeroes to remove keys from RAM."""
+    if isinstance(buf, bytearray):
+        for i in range(len(buf)):
+            buf[i] = 0
+
+
+def derive_key(passphrase: str, salt: bytes) -> bytearray:
+    import os
+    env_iterations = os.environ.get("E2EE_PBKDF2_ITERATIONS")
+    iterations = PBKDF2_ITERATIONS
+    if env_iterations:
+        try:
+            iterations = int(env_iterations)
+        except ValueError:
+            pass
+
+    pass_bytes = bytearray(passphrase.encode("utf-8"))
+    try:
+        derived = hashlib.pbkdf2_hmac(
+            "sha256",
+            bytes(pass_bytes),
+            salt,
+            iterations,
+            dklen=KEY_SIZE,
+        )
+        return bytearray(derived)
+    finally:
+        zero_buffer(pass_bytes)
 
 
 def generate_salt(n: int = 32) -> bytes:
     return secrets.token_bytes(n)
 
 
-def encrypt_bytes(plaintext: bytes, key: bytes) -> tuple[bytes, bytes]:
+def encrypt_bytes(plaintext: bytes, key: bytearray | bytes) -> tuple[bytes, bytes]:
     iv = secrets.token_bytes(AESGCM_IV_LEN)
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    aesgcm = AESGCM(key)
+    aesgcm = AESGCM(bytes(key))
     ciphertext = aesgcm.encrypt(iv, plaintext, None)
     return ciphertext, iv
 
 
-def decrypt_bytes(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
+def decrypt_bytes(ciphertext: bytes, key: bytearray | bytes, iv: bytes) -> bytes:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    aesgcm = AESGCM(key)
+    aesgcm = AESGCM(bytes(key))
     return aesgcm.decrypt(iv, ciphertext, None)
 
 
 def encrypt_file(plaintext: bytes, passphrase: str) -> EncryptedPayload:
     salt = generate_salt()
     key = derive_key(passphrase, salt)
-    ciphertext, iv = encrypt_bytes(plaintext, key)
-    return EncryptedPayload(
-        ciphertext_b64=base64.b64encode(ciphertext).decode("ascii"),
-        iv_b64=base64.b64encode(iv).decode("ascii"),
-        salt_b64=base64.b64encode(salt).decode("ascii"),
-    )
+    try:
+        ciphertext, iv = encrypt_bytes(plaintext, key)
+        return EncryptedPayload(
+            ciphertext_b64=base64.b64encode(ciphertext).decode("ascii"),
+            iv_b64=base64.b64encode(iv).decode("ascii"),
+            salt_b64=base64.b64encode(salt).decode("ascii"),
+        )
+    finally:
+        zero_buffer(key)
 
 
 def decrypt_file(payload: EncryptedPayload, passphrase: str) -> bytes:
     salt = base64.b64decode(payload.salt_b64)
     key = derive_key(passphrase, salt)
-    ciphertext = base64.b64decode(payload.ciphertext_b64)
-    iv = base64.b64decode(payload.iv_b64)
-    return decrypt_bytes(ciphertext, key, iv)
+    try:
+        ciphertext = base64.b64decode(payload.ciphertext_b64)
+        iv = base64.b64decode(payload.iv_b64)
+        return decrypt_bytes(ciphertext, key, iv)
+    finally:
+        zero_buffer(key)
 
 
 def encrypt_bytes_to_b64(plaintext: bytes, passphrase: str) -> str:
@@ -118,12 +145,18 @@ def generate_file_key() -> str:
 def wrap_file_key(file_key: str, master_key: str) -> str:
     salt = generate_salt(16)
     key = derive_key(master_key, salt)
-    wrapped, iv = encrypt_bytes(file_key.encode("utf-8"), key)
-    return base64.b64encode(salt + iv + wrapped).decode("ascii")
+    try:
+        wrapped, iv = encrypt_bytes(file_key.encode("utf-8"), key)
+        return base64.b64encode(salt + iv + wrapped).decode("ascii")
+    finally:
+        zero_buffer(key)
 
 
 def unwrap_file_key(wrapped: str, master_key: str) -> str:
     data = base64.b64decode(wrapped)
     salt, iv, ciphertext = data[:16], data[16:16 + AESGCM_IV_LEN], data[16 + AESGCM_IV_LEN:]
     key = derive_key(master_key, salt)
-    return decrypt_bytes(ciphertext, key, iv).decode("utf-8")
+    try:
+        return decrypt_bytes(ciphertext, key, iv).decode("utf-8")
+    finally:
+        zero_buffer(key)

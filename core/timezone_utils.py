@@ -19,6 +19,24 @@ def get_user_timezone(tz_name: Optional[str] = None) -> pytz.BaseTzInfo:
     return pytz.UTC
 
 
+def _parse_resilient_iso(dt_str: str) -> datetime:
+    cleaned = dt_str.replace('Z', '+00:00')
+    try:
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        pass
+    try:
+        import dateutil.parser
+        return dateutil.parser.isoparse(dt_str)
+    except Exception:
+        pass
+    try:
+        import dateutil.parser
+        return dateutil.parser.parse(dt_str)
+    except Exception:
+        return datetime.strptime(dt_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+
+
 def utc_to_local(dt: Union[datetime, str], tz_name: Optional[str] = None) -> datetime:
     """
     Convert UTC datetime to user's local timezone.
@@ -33,7 +51,7 @@ def utc_to_local(dt: Union[datetime, str], tz_name: Optional[str] = None) -> dat
     local_tz = get_user_timezone(tz_name)
     
     if isinstance(dt, str):
-        dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        dt = _parse_resilient_iso(dt)
     
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)

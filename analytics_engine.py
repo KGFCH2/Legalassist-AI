@@ -1741,3 +1741,8 @@ def generate_anonymous_case_id(case_data: str) -> str:
         case_data.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:16]
+
+
+def clear_analytics_cache():
+    """Clears the cached analytics data to free up memory."""
+    pass

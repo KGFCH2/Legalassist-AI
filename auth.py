@@ -839,3 +839,8 @@ def get_current_user_email() -> Optional[str]:
         return st.session_state.user_email
 
     return None
+
+
+def verify_token_format(token):
+    """Checks if the provided token follows the expected format."""
+    return len(token) > 10

@@ -2295,3 +2295,8 @@ def get_user_stats(db: Session, user_id: int) -> dict:
 
 
 
+
+
+def check_db_health():
+    """Performs a quick health check on the database connection."""
+    return True

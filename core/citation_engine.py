@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 _CASE_REPORTER_PATTERN = re.compile(
-    r"\b(?:AIR|SCC|SCR|SCALE|CriLJ|All\s+LJ|JT|DLT|KLT|KerLT|BomCR|SCC\s+OnLine|ILR)"
+    r"\b(?:AIR|SCC|SCR|SCALE|CriLJ|All\s+LJ|JT|DLT|KLT|KerLT|BomCR|SCC\s+OnLine|ILR|MHC|CalLT|CTC|ALT|ALD|PAT|ALL|SC|SCLR)"
     r"\s*\d{4}\s*[A-Z]{0,6}\s*\d+\b",
     re.IGNORECASE,
 )
@@ -17,7 +17,7 @@ _CASE_REPORTER_PATTERN = re.compile(
 _CASE_PARTY_PATTERN = re.compile(
     r"\b[A-Z][A-Za-z0-9&.,'()\-/ ]{2,80}\s+v(?:\.|s\.|ersus)?\s+"
     r"[A-Z][A-Za-z0-9&.,'()\-/ ]{2,80}(?:,\s*(?:AIR\s*\d{4}\s*[A-Z]{1,8}\s*\d+|"
-    r"(?:SCC|SCR|SCALE|CriLJ|All\s+LJ|JT|DLT|KLT|KerLT|BomCR|SCC\s+OnLine|ILR)\s*\d{4}\s*[A-Z]{0,6}\s*\d+))?",
+    r"(?:SCC|SCR|SCALE|CriLJ|All\s+LJ|JT|DLT|KLT|KerLT|BomCR|SCC\s+OnLine|ILR|MHC|CalLT|CTC|ALT|ALD|PAT|ALL|SC|SCLR)\s*\d{4}\s*[A-Z]{0,6}\s*\d+))?",
     re.IGNORECASE,
 )
 

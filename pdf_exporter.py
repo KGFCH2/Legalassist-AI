@@ -746,3 +746,8 @@ def generate_anonymized_pdf(
         return None
     finally:
         db.close()
+
+
+def get_supported_pdf_fonts():
+    """Returns a list of fonts supported by the PDF exporter."""
+    return ["Helvetica", "Arial", "Times"]

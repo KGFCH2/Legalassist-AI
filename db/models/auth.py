@@ -25,7 +25,7 @@ class User(Base):
     is_admin = Column(Boolean, default=False, nullable=False)
 
     cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
-    preferences = relationship("UserPreference", back_populates="user", cascade="all, delete-orphan")
+    preferences = relationship("db.models.notifications.UserPreference", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self) -> dict:
         return {

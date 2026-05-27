@@ -54,6 +54,10 @@ class EncryptedPayload:
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
+    if not passphrase:
+        raise ValueError("Passphrase must not be empty.")
+    if not salt or len(salt) < 16:
+        raise ValueError("Salt must be at least 16 bytes long.")
     return hashlib.pbkdf2_hmac(
         "sha256",
         passphrase.encode("utf-8"),

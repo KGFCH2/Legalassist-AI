@@ -307,12 +307,11 @@ def check_and_send_reminders():
         init_db()
 
         db = SessionLocal()
+        sent_count = 0
         try:
             # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
             upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
             logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
-
-            sent_count = 0
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
             eligible = []

@@ -71,22 +71,22 @@ class TestSchedulerComprehensive:
                 phone_number=f"+91{days}00000000",
                 notification_channel=NotificationChannel.BOTH
             )
+            # Mock dependencies and underlying send functions (not the whole service)
+            with patch("scheduler.init_db"), \
+                 patch("scheduler.SessionLocal", return_value=test_db), \
+                 patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
+                 patch("scheduler.is_reminder_time_for_user", return_value=True):
 
-        # Mock dependencies and underlying send functions (not the whole service)
-        with patch("scheduler.SessionLocal", return_value=test_db), \
-             patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
-             patch("scheduler.is_reminder_time_for_user", return_value=True):
-            
-            # send_reminders returns a list of NotificationResult objects
-            mock_send_reminders.return_value = [
-                NotificationResult(success=True, channel=NotificationChannel.SMS, recipient="+91test", message_id="sms_123", error=None),
-                NotificationResult(success=True, channel=NotificationChannel.EMAIL, recipient="test@example.com", message_id="email_123", error=None),
-            ]
-            
-            check_and_send_reminders()
-            
-            # Verify it called send_reminders 4 times (once per threshold)
-            assert mock_send_reminders.call_count == 4
+                # send_reminders returns a list of NotificationResult objects
+                mock_send_reminders.return_value = [
+                    NotificationResult(success=True, channel=NotificationChannel.SMS, recipient="+91test", message_id="sms_123", error=None),
+                    NotificationResult(success=True, channel=NotificationChannel.EMAIL, recipient="test@example.com", message_id="email_123", error=None),
+                ]
+
+                check_and_send_reminders()
+
+                # Verify it called send_reminders 4 times (once per threshold)
+                assert mock_send_reminders.call_count == 4
 
     def test_check_and_send_reminders_continues_after_send_failure(self):
         """Test that one deadline failure does not stop later deadlines from being processed."""
@@ -138,9 +138,11 @@ class TestSchedulerComprehensive:
 
         with patch("scheduler.init_db"), \
              patch("scheduler.SessionLocal", return_value=fake_db), \
-             patch("scheduler.get_upcoming_deadlines", return_value=deadlines), \
+             patch("scheduler.get_reminder_dispatch_candidates", return_value=[
+                 (deadlines[0], 30, prefs[0]),
+                 (deadlines[1], 30, prefs[1]),
+             ]), \
              patch("scheduler.notification_service.send_reminders", side_effect=fake_send_reminders) as mock_send_reminders, \
-             patch("scheduler.is_reminder_time_for_user", return_value=True), \
              patch("scheduler.logger.error") as mock_error:
             check_and_send_reminders()
 

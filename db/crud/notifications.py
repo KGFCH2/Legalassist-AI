@@ -113,6 +113,73 @@ def update_notification_log_by_message_id(
     return log
 
 
+def reserve_notification(
+    db: Session,
+    deadline_id: int,
+    user_id: int,
+    channel: NotificationChannel,
+    recipient: str,
+    days_before: int,
+    message_preview: Optional[str] = None,
+) -> tuple[NotificationLog, bool]:
+    log, created = get_or_create_notification_log(
+        db=db,
+        deadline_id=deadline_id,
+        user_id=user_id,
+        channel=channel,
+        recipient=recipient,
+        days_before=days_before,
+    )
+
+    if created and message_preview is not None:
+        log.message_preview = message_preview
+        db.commit()
+        db.refresh(log)
+
+    return log, created
+
+
+def update_notification_result(
+    db: Session,
+    deadline_id: int,
+    user_id: int,
+    days_before: int,
+    channel: NotificationChannel,
+    status: NotificationStatus,
+    message_id: Optional[str] = None,
+    error_message: Optional[str] = None,
+    message_preview: Optional[str] = None,
+) -> NotificationLog:
+    updated = update_notification_log_by_keys(
+        db=db,
+        deadline_id=deadline_id,
+        days_before=days_before,
+        channel=channel,
+        status=status,
+        message_id=message_id,
+        error_message=error_message,
+        message_preview=message_preview,
+    )
+    if updated is not None:
+        return updated
+
+    log = log_notification(
+        db=db,
+        deadline_id=deadline_id,
+        user_id=user_id,
+        channel=channel,
+        recipient="",
+        days_before=days_before,
+        status=status,
+        message_id=message_id,
+        error_message=error_message,
+        message_preview=message_preview,
+    )
+    db.commit()
+    db.refresh(log)
+    return log
+
+
 def create_case_deadline(
     db: Session,
     user_id: int,

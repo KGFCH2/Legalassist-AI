@@ -120,7 +120,7 @@ class SMSClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(lambda e: any(err in str(e).lower() for err in ('503', '429', 'timeout', 'connection', 'connect', 'unreachable'))),
         reraise=True
     )
     def _create_message_with_retry(self, to_number: str, message: str):
@@ -185,7 +185,7 @@ class EmailClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(lambda e: any(err in str(e).lower() for err in ('503', '429', 'timeout', 'connection', 'connect', 'unreachable'))),
         reraise=True
     )
     def _send_email_with_retry(self, message):

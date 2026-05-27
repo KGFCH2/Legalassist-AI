@@ -522,3 +522,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def print_cli_banner():
+    """Prints the command-line interface banner."""
+    print("Legalassist-AI CLI v1.0")

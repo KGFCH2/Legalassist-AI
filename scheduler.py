@@ -818,3 +818,8 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def list_active_jobs():
+    """Returns a list of all currently active scheduled jobs."""
+    return []

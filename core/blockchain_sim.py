@@ -29,6 +29,8 @@ class BlockchainSimulator:
     def _append_block(self, data: Any, data_hash: Optional[str] = None) -> Block:
         index = len(self.ledger)
         prev_hash = self.ledger[-1]["block_hash"] if self.ledger else "0" * 64
+        if self.ledger and self.ledger[-1]["index"] != index - 1:
+            raise ValueError("Blockchain state inconsistency detected: corrupted ledger link.")
         timestamp = time.time()
         dh = data_hash or (hashlib.sha256(str(data).encode("utf-8")).hexdigest())
         block_hash = self._compute_block_hash(index, prev_hash, timestamp, dh)

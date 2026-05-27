@@ -49,9 +49,9 @@ class CaseDeadline(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False, index=True)
 
-    case = relationship("Case", back_populates="deadlines")
+    case = relationship("db.models.cases.Case", back_populates="deadlines")
     notifications = relationship("db.models.notifications.NotificationLog", back_populates="deadline")
-    attachments = relationship("Attachment", back_populates="deadline")
+    attachments = relationship("db.models.cases.Attachment", back_populates="deadline")
 
     def days_until_deadline(self) -> int:
         from db.session import _to_utc_datetime
@@ -90,11 +90,11 @@ class Case(Base):
     }
 
     user = relationship("db.models.auth.User", back_populates="cases")
-    documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan")
-    deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
-    timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
-    notes = relationship("CaseNote", back_populates="case", cascade="all, delete-orphan")
-    attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan")
+    documents = relationship("db.models.cases.CaseDocument", back_populates="case", cascade="all, delete-orphan")
+    deadlines = relationship("db.models.cases.CaseDeadline", back_populates="case", cascade="all, delete-orphan")
+    timeline_events = relationship("db.models.cases.CaseTimeline", back_populates="case", cascade="all, delete-orphan")
+    notes = relationship("db.models.cases.CaseNote", back_populates="case", cascade="all, delete-orphan")
+    attachments = relationship("db.models.cases.Attachment", back_populates="case", cascade="all, delete-orphan")
 
 
 class CaseDocument(Base):
@@ -113,8 +113,8 @@ class CaseDocument(Base):
     extraction_method = Column(String(50), nullable=True)
     ocr_used = Column(Boolean, default=False, nullable=False)
 
-    case = relationship("Case", back_populates="documents")
-    attachment = relationship("Attachment", foreign_keys=[source_attachment_id])
+    case = relationship("db.models.cases.Case", back_populates="documents")
+    attachment = relationship("db.models.cases.Attachment", foreign_keys=[source_attachment_id])
 
 
 class Attachment(Base):
@@ -133,8 +133,8 @@ class Attachment(Base):
     is_encrypted = Column(Boolean, default=False, nullable=False)
     wrapped_key = Column(Text, nullable=True)
 
-    case = relationship("Case", back_populates="attachments")
-    deadline = relationship("CaseDeadline", back_populates="attachments")
+    case = relationship("db.models.cases.Case", back_populates="attachments")
+    deadline = relationship("db.models.cases.CaseDeadline", back_populates="attachments")
 
 
 class CaseTimeline(Base):
@@ -148,7 +148,7 @@ class CaseTimeline(Base):
     event_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
-    case = relationship("Case", back_populates="timeline_events")
+    case = relationship("db.models.cases.Case", back_populates="timeline_events")
 
 
 class CaseNote(Base):
@@ -165,8 +165,8 @@ class CaseNote(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
-    case = relationship("Case", back_populates="notes")
-    versions = relationship("CaseNoteVersion", back_populates="note", cascade="all, delete-orphan", order_by="CaseNoteVersion.version_number")
+    case = relationship("db.models.cases.Case", back_populates="notes")
+    versions = relationship("db.models.cases.CaseNoteVersion", back_populates="note", cascade="all, delete-orphan", order_by="db.models.cases.CaseNoteVersion.version_number")
 
 
 class CaseNoteVersion(Base):
@@ -183,4 +183,4 @@ class CaseNoteVersion(Base):
     version_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
-    note = relationship("CaseNote", back_populates="versions")
+    note = relationship("db.models.cases.CaseNote", back_populates="versions")

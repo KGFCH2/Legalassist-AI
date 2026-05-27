@@ -81,6 +81,15 @@ def transcribe_audio(
     if not audio_bytes:
         raise TranscriptionInvalidAudio("audio_bytes must not be empty")
 
+    # Detect the audio format dynamically to prevent Whisper codec mismatches
+    try:
+        import filetype
+        kind = filetype.guess(audio_bytes)
+        if kind and kind.extension in {"wav", "mp3", "m4a", "ogg", "flac", "webm", "mp4"}:
+            filename = f"audio.{kind.extension}"
+    except Exception as exc:
+        logger.warning("Failed to inspect audio file format: %s", exc)
+
     # Build client lazily so callers that supply their own client pay no cost.
     if client is None:
         client = _build_client()

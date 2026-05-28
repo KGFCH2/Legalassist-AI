@@ -722,6 +722,13 @@ class NotificationService:
             logger.debug("Email reservation already exists; skipping send", deadline_id=deadline.id, days_left=days_left)
             return NotificationResult(success=False, channel=NotificationChannel.EMAIL, recipient=user_preference.email, error="already_reserved")
 
+        # Annotate the reserved record with a placeholder task id BEFORE dispatching,
+        # so the worker never races against an uncommitted DB state.
+        reserved_log.message_id = f"task_pending"
+        reserved_log.message_preview = html_content
+        db.add(reserved_log)
+        db.commit()
+
         task_result = send_email_task.delay(
             to_email=user_preference.email,
             subject=subject,
@@ -731,9 +738,7 @@ class NotificationService:
             days_left=days_left,
         )
 
-        # Annotate with the real task id without touching the status column.
-        # update_notification_result(status=PENDING) would overwrite a SENT
-        # status set by a fast Celery worker that completed before this line.
+        # Update with the real Celery task id (best-effort — worker may already be updating).
         try:
             db.query(NotificationLog).filter(
                 NotificationLog.deadline_id == deadline.id,

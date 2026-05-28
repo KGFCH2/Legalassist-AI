@@ -513,6 +513,19 @@ def analyze_document_task(
         content_parts.append(hashlib.sha256(file_bytes).hexdigest())
     if text:
         content_parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
+    if file_path:
+        try:
+            with open(file_path, "rb") as f:
+                content_parts.append(hashlib.sha256(f.read()).hexdigest())
+        except (OSError, IOError) as exc:
+            logger.warning("content_hash_file_path_failed", path=file_path, error=str(exc))
+    if file_url:
+        try:
+            resp = requests.get(file_url, timeout=10)
+            if resp.status_code == 200:
+                content_parts.append(hashlib.sha256(resp.content).hexdigest())
+        except requests.RequestException as exc:
+            logger.warning("content_hash_file_url_failed", url=file_url, error=str(exc))
     content_hash = hashlib.sha256("|".join(content_parts).encode()).hexdigest()[:16] if content_parts else ""
 
     idemp = IdempotencyManager()

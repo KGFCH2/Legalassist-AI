@@ -43,6 +43,12 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
+    CaseNote,
+    CaseNoteVersion,
+    Report,
+    ReportStatus,
+    ReportType,
+    ReportFormat,
 )
 from db.crud.notifications import (
     create_case_deadline,
@@ -51,6 +57,9 @@ from db.crud.notifications import (
     log_notification,
     get_notification_history,
 )
+from db.case_service import save_case_note_draft, publish_case_note, get_case_note_history
+from db.otp_service import revoke_token, is_token_revoked, cleanup_expired_revoked_tokens
+
 
 __all__ = [
     "Base",
@@ -126,6 +135,18 @@ __all__ = [
     "create_timeline_event",
     "create_attachment",
     "get_attachments_for_case",
+    "CaseNote",
+    "CaseNoteVersion",
+    "Report",
+    "ReportStatus",
+    "ReportType",
+    "ReportFormat",
+    "save_case_note_draft",
+    "publish_case_note",
+    "get_case_note_history",
+    "revoke_token",
+    "is_token_revoked",
+    "cleanup_expired_revoked_tokens",
 ]
 
 
@@ -693,12 +714,14 @@ def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
 
 
 
-# Dynamic relationships injection to support legacy collaborative features on Case model
-from db.models.cases import Case
+# Dynamic relationships injection to support legacy collaborative features on Case and User models
+from db.models import Case, User
 from sqlalchemy.orm import relationship
 
 Case.comments = relationship("CaseComment", back_populates="case", cascade="all, delete-orphan", order_by="CaseComment.created_at")
 Case.presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
+User.case_comments = relationship("CaseComment", back_populates="user", cascade="all, delete-orphan")
+User.case_presence = relationship("CasePresence", back_populates="user", cascade="all, delete-orphan")
 
 
 

@@ -852,7 +852,7 @@ async def get_case_note_history_endpoint(
                 changed_by_user_id=str(version.changed_by_user_id),
                 changed_by_email=version.changed_by_email,
                 created_at=version.created_at,
-                version_metadata=version.version_metadata,
+                version_metadata={k: v for k, v in (version.version_metadata or {}).items() if k in {"published_from_draft", "source"}},
             )
             for version in versions
         ],

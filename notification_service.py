@@ -585,12 +585,12 @@ class NotificationService:
                             <span class="deadline-value">{days_left} Days</span>
                         </div>
                     </div>
-
+ 
                     <div class="deadline-label">Details</div>
                     <div class="description">
                         "{escaped_desc}"
                     </div>
-
+ 
                     <div style="text-align: center;">
                         <a href="{self.base_url}/cases/{deadline.case_id}" class="cta-button">
                             View Case Dashboard
@@ -773,7 +773,7 @@ class NotificationService:
         # for the SendGrid API response, we dispatch a Celery task.
         #
         # This allows the request (or the periodic check) to complete 
-        # immediately, providing a much smoother and "snappier" experience 
+        # immediately, providing a much smoother experience 
         # for the end-user or the system scheduler.
         # ====================================================================
         
@@ -796,7 +796,7 @@ class NotificationService:
         )
 
         if not created:
-            logger.debug("Email reservation already exists; skipping send", deadline_id=deadline.id, days_left=days_left)
+            logger.debug("Email reservation already exists; skipping send", deadline_id=deadline.id, days_before=days_left)
             return NotificationResult(success=False, channel=NotificationChannel.EMAIL, recipient=user_preference.email, error="Already sent")
 
         if not _should_use_celery(send_email_task):

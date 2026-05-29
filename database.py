@@ -9,7 +9,7 @@ working while the refactor continues.
 from __future__ import annotations
 
 import datetime as dt
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session
 
 from db.base import Base

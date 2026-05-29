@@ -31,6 +31,8 @@ class APISettings(BaseSettings):
     RATE_LIMIT_REQUESTS: int = 100  # requests
     RATE_LIMIT_WINDOW: int = 60  # seconds
     RATE_LIMIT_BURST: int = 200  # max burst
+    AUTH_RATE_LIMIT_REQUESTS: int = 5
+    AUTH_RATE_LIMIT_WINDOW: int = 60
     
     # Authentication
     AUTH_ENABLED: bool = True
@@ -42,8 +44,12 @@ class APISettings(BaseSettings):
         _jwt_from_vault = None
 
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", _jwt_from_vault or "")
+    JWT_SECRET_KEY_PREVIOUS: str = os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
+    JWT_ACCESS_TOKEN_MINUTES: int = 1440
+    JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "legalassist-users")
     API_KEY_HEADER: str = "X-API-Key"
     CSRF_SECRET: str = ""
     

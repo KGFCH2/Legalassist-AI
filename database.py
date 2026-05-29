@@ -45,6 +45,10 @@ from db.models import (
     PrecedentMatch,
     CaseNote,
     CaseNoteVersion,
+    Report,
+    ReportStatus,
+    ReportType,
+    ReportFormat,
 )
 from db.crud.notifications import (
     create_case_deadline,
@@ -91,6 +95,10 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
+    "Report",
+    "ReportStatus",
+    "ReportType",
+    "ReportFormat",
     "create_case_deadline",
     "get_upcoming_deadlines",
     "get_user_deadlines",
@@ -167,13 +175,17 @@ def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
     return user
 
 
-def create_otp_verification(db: Session, email: str, otp_hash: str, expires_at: dt.datetime) -> OTPVerification:
-    """Create a new OTP verification record"""
-    otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
-    db.add(otp)
-    db.commit()
-    db.refresh(otp)
-    return otp
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
+) -> OTPVerification:
+    """Create a new OTP verification record, enforcing rate limits and IP tracking."""
+    from db.otp_service import create_otp_verification as _create_otp
+    return _create_otp(db, email, otp_hash, expires_at, max_requests_per_hour, requester_ip)
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:

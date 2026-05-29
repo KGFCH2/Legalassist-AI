@@ -27,7 +27,7 @@ from typing import Dict, Any, Optional
 import io
 import requests
 from types import SimpleNamespace
-from api.validation import validate_file_url
+from api.validation import validate_file_url, fetch_url_safe
 
 try:
     from celery import Celery, Task

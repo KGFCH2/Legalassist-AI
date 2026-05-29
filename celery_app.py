@@ -148,6 +148,7 @@ logger = structlog.get_logger(__name__)
 initialize_observability_for_environment()
 
 
+
 def build_task_context_headers(
     request_id: Optional[str] = None,
     context_user_id: Optional[str] = None,
@@ -312,39 +313,7 @@ if not _redis_env:
     celery_app.conf = SimpleNamespace()
     celery_app.conf.update = lambda **kw: None
     celery_app.conf.__setitem__ = lambda k, v: None
-    class _DummyTask:
-        def __init__(self, func):
-            self._func = func
-            self.name = func.__name__
-            self.request = SimpleNamespace(id="fallback-task", headers={})
 
-        def run(self, *args, **kwargs):
-            return self._func(*args, **kwargs)
-
-        def __call__(self, *args, **kwargs):
-            return self.run(*args, **kwargs)
-
-        def delay(self, *args, **kwargs):
-            try:
-                self.run(self, *args, **kwargs)
-            except Exception:
-                pass
-            import uuid
-            return SimpleNamespace(id=uuid.uuid4().hex, state="SUCCESS", info=None, result=None)
-
-        def apply_async(self, *args, **kwargs):
-            kw = kwargs.get("kwargs", {}) or kwargs
-            try:
-                self.run(self, **kw)
-            except Exception:
-                pass
-            import uuid
-            return SimpleNamespace(id=uuid.uuid4().hex, state="SUCCESS", info=None, result=None)
-
-        def update_state(self, *args, **kwargs):
-            return None
-
-    celery_app.task = lambda *args, **kwargs: (lambda f: _DummyTask(f))
     celery_app.AsyncResult = lambda *args, **kwargs: SimpleNamespace(state="PENDING", result=None, status="PENDING")
     celery_app.main = "legalassist"
     REDIS_URL = ""
@@ -364,42 +333,6 @@ else:
 # Detailed configuration for Celery behavior, performance, and reliability.
 # This includes serialization settings, time limits, and worker behavior.
 
-REMINDER_DISPATCH_BACKEND = os.getenv("REMINDER_DISPATCH_BACKEND", "apscheduler").strip().lower()
-
-beat_schedule = {
-    "cleanup-old-tasks": {
-        "task": "cleanup_old_tasks",
-        "schedule": 86400.0,
-        "options": {"queue": "maintenance"},
-    },
-    "cleanup-revoked-tokens": {
-        "task": "cleanup_revoked_tokens",
-        "schedule": 21600.0,
-        "options": {"queue": "maintenance"},
-    },
-    "enforce-retention-policies": {
-        "task": "enforce_retention_policies",
-        "schedule": 86400.0,
-        "options": {"queue": "compliance"},
-    },
-    "enforce-data-anonymization": {
-        "task": "enforce_data_anonymization",
-        "schedule": 86400.0,
-        "options": {"queue": "compliance"},
-    },
-    "purge-expired-data": {
-        "task": "purge_expired_data",
-        "schedule": 604800.0,
-        "options": {"queue": "compliance"},
-    },
-}
-
-if REMINDER_DISPATCH_BACKEND == "celery":
-    beat_schedule["send-deadline-reminders"] = {
-        "task": "send_deadline_reminders",
-        "schedule": 3600.0,
-        "options": {"queue": "maintenance"},
-    }
 
 celery_app.conf.update(
     # Data Serialization
@@ -424,8 +357,6 @@ celery_app.conf.update(
     # Max tasks per child prevents memory leaks in long-lived worker processes
     worker_max_tasks_per_child=1000,
     # Beat Schedule Configuration for periodic tasks
-    beat_schedule=beat_schedule,
-)
 
 
 # ============================================================================

@@ -51,6 +51,12 @@ def validate_file_path(file_path: str) -> str:
             detail="file_path could not be resolved",
         )
 
+    if not resolved.exists():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path does not exist",
+        )
+
     allowed_dirs = [
         Path(Config.ATTACHMENTS_DIR).resolve(),
     ]

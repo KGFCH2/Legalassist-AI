@@ -483,13 +483,12 @@ def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> bool
 
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Calculate high-level stats for a user dashboard"""
-    cases = get_user_cases(db, user_id)
+    cases = get_user_cases(db, user_id) or []
 
     active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
     appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
     closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
 
-    # Get upcoming deadlines count
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,

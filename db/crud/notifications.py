@@ -19,7 +19,7 @@ def get_or_create_notification_log(
     """Atomically create a NotificationLog row under a savepoint.
 
     Uses a nested transaction (savepoint) so the unique constraint on
-    (deadline_id, days_before, channel) is enforced immediately via flush,
+    (user_id, deadline_id, days_before, channel) is enforced immediately via flush,
     and IntegrityError is caught within the function itself.  Without a
     savepoint, two concurrent readers can both flush() the same key under
     READ COMMITTED isolation and both observe a successful insert; the
@@ -42,6 +42,7 @@ def get_or_create_notification_log(
         return log, True
     except IntegrityError:
         existing = db.query(NotificationLog).filter(
+            NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
@@ -53,6 +54,7 @@ def get_or_create_notification_log(
 
 def update_notification_log_by_keys(
     db: Session,
+    user_id: int,
     deadline_id: int,
     days_before: int,
     channel: NotificationChannel,
@@ -62,6 +64,7 @@ def update_notification_log_by_keys(
     message_preview: Optional[str] = None,
 ) -> Optional[NotificationLog]:
     log = db.query(NotificationLog).filter(
+        NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -146,6 +149,7 @@ def reserve_notification(
     except IntegrityError:
         db.rollback()
         existing = db.query(NotificationLog).filter(
+            NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
@@ -168,6 +172,7 @@ def update_notification_result(
 ) -> NotificationLog:
     """Upsert a notification log after a delivery attempt."""
     existing = db.query(NotificationLog).filter(
+        NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -264,8 +269,9 @@ def has_notification_been_sent(
     deadline_id: int,
     days_before: int,
     channel: NotificationChannel,
+    user_id: Optional[int] = None,
 ) -> bool:
-    return db.query(NotificationLog).filter(
+    query = db.query(NotificationLog).filter(
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -274,7 +280,10 @@ def has_notification_been_sent(
             NotificationStatus.DELIVERED,
             NotificationStatus.OPENED,
         ]),
-    ).first() is not None
+    )
+    if user_id is not None:
+        query = query.filter(NotificationLog.user_id == user_id)
+    return query.first() is not None
 
 
 def log_notification(

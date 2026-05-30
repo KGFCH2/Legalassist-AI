@@ -501,6 +501,7 @@ def send_sms_task(
             with db_session() as db:
                 update_notification_log_by_keys(
                     db=db,
+                    user_id=user_id,
                     deadline_id=deadline_id,
                     days_before=days_left,
                     channel=NotificationChannel.SMS,
@@ -1018,7 +1019,7 @@ class NotificationService:
 
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel
-            if not has_notification_been_sent(db, deadline.id, days_left, channel):
+            if not has_notification_been_sent(db, deadline.id, days_left, channel, user_id=deadline.user_id):
                 if channel == NotificationChannel.SMS:
                     result = self.send_sms_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)

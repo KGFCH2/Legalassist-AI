@@ -72,7 +72,7 @@ from db.crud.notifications import (
 from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.deadline_engine import get_deadline_first_action
-from core.log_redaction import mask_recipient, sanitize_log_text
+from core.log_redaction import mask_recipient, sanitize_log_text, storage_safe_recipient
 from services.timeline_service import timeline_service as case_timeline_service
 
 # Import debug mode helper
@@ -842,9 +842,9 @@ class NotificationService:
                     deadline_id=deadline.id,
                     user_id=deadline.user_id,
                     channel=NotificationChannel.SMS,
-                    recipient=user_preference.phone_number,
+                    recipient=storage_safe_recipient(user_preference.phone_number),
                     days_before=days_left,
-                    message_preview=message,
+                    message_preview=_safe_preview(message),
                     status=status,
                     message_id=message_id,
                     error_message=error,
@@ -937,9 +937,9 @@ class NotificationService:
             deadline_id=deadline.id,
             user_id=deadline.user_id,
             channel=NotificationChannel.EMAIL,
-            recipient=user_preference.email,
+            recipient=storage_safe_recipient(user_preference.email),
             days_before=days_left,
-            message_preview=html_content,
+            message_preview=_safe_preview(html_content),
         )
 
         if not created:
@@ -949,7 +949,7 @@ class NotificationService:
         # Annotate the reserved record with a placeholder task id BEFORE dispatching,
         # so the worker never races against an uncommitted DB state.
         reserved_log.message_id = "task_pending"
-        reserved_log.message_preview = html_content
+        reserved_log.message_preview = _safe_preview(html_content)
         db.add(reserved_log)
         db.commit()
 

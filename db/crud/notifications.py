@@ -5,6 +5,7 @@ from db.models.notifications import NotificationLog, NotificationStatus, Notific
 from db.models.cases import CaseDeadline, Case
 from sqlalchemy.exc import IntegrityError
 from core.deadline_engine import get_deadline_first_action
+from core.log_redaction import storage_safe_recipient, sanitize_log_text
 
 
 def get_or_create_notification_log(
@@ -31,7 +32,7 @@ def get_or_create_notification_log(
                 deadline_id=deadline_id,
                 user_id=user_id,
                 channel=channel,
-                recipient=recipient,
+                recipient=storage_safe_recipient(recipient),
                 days_before=days_before,
                 status=NotificationStatus.PENDING,
             )
@@ -73,7 +74,7 @@ def update_notification_log_by_keys(
     if error_message is not None:
         log.error_message = error_message
     if message_preview is not None:
-        log.message_preview = message_preview
+        log.message_preview = sanitize_log_text(message_preview)
     now = dt.datetime.now(dt.timezone.utc)
     if status == NotificationStatus.SENT:
         log.sent_at = now
@@ -103,7 +104,7 @@ def update_notification_log_by_message_id(
     if error_message is not None:
         log.error_message = error_message
     if message_preview is not None:
-        log.message_preview = message_preview
+        log.message_preview = sanitize_log_text(message_preview)
 
     now = dt.datetime.now(dt.timezone.utc)
     if status == NotificationStatus.DELIVERED:
@@ -135,7 +136,7 @@ def reserve_notification(
         recipient=recipient,
         days_before=days_before,
         status=NotificationStatus.PENDING,
-        message_preview=message_preview,
+        message_preview=sanitize_log_text(message_preview),
     )
     try:
         db.add(log)
@@ -175,12 +176,12 @@ def update_notification_result(
     if existing:
         existing.status = status
         if recipient is not None:
-            existing.recipient = recipient
+            existing.recipient = storage_safe_recipient(recipient)
         if attempted_channels is not None:
             existing.attempted_channels = attempted_channels
         existing.message_id = message_id or existing.message_id
         existing.error_message = error_message or existing.error_message
-        existing.message_preview = message_preview or existing.message_preview
+        existing.message_preview = sanitize_log_text(message_preview) or existing.message_preview
         if status == NotificationStatus.SENT:
             existing.sent_at = dt.datetime.now(dt.timezone.utc)
         db.add(existing)
@@ -193,7 +194,7 @@ def update_notification_result(
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient=recipient or "unknown",
+        recipient=storage_safe_recipient(recipient or "unknown"),
         days_before=days_before,
     )[0]
 
@@ -292,7 +293,7 @@ def log_notification(
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient=recipient,
+        recipient=storage_safe_recipient(recipient),
         days_before=days_before,
         status=status,
         message_id=message_id,

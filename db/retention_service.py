@@ -61,7 +61,7 @@ def archive_expired_cases(db: Session, cutoff_days: int, dry_run: bool = False) 
 
     q = (
         db.query(Case)
-        .filter(Case.status.notin_(active_statuses))
+        .filter(Case.status.in_(active_statuses))
         .filter(Case.updated_at < cutoff)
     )
     if dry_run:

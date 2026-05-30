@@ -21,6 +21,7 @@ from .analytics import (
     KnowledgeGraphEdge,
     PrecedentMatch,
 )
+from .usage_log import UsageLog
 from .knowledge import KnowledgeInvalidation, KnowledgeInvalidationStatus
 
 __all__ = [
@@ -65,5 +66,6 @@ __all__ = [
     "KnowledgeInvalidation",
     "KnowledgeInvalidationStatus",
     "SchedulerRun",
+    "UsageLog",
 ]
 

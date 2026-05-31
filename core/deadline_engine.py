@@ -127,6 +127,7 @@ def calculate_deadline(
     # Apply adjustments sequentially so each step normalizes independently.
     final = adjusted_for_weekends_holidays
     if jurisdiction_adjustment:
+        # Sequentially apply the filing cutoff adjustments first
         final += timedelta(days=jurisdiction_adjustment)
         final = _roll_forward(final)
     if emergency_extension_days:

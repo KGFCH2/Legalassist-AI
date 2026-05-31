@@ -103,7 +103,7 @@ from db.crud.notifications import (
 from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.deadline_engine import get_deadline_first_action
-from core.log_redaction import mask_recipient, sanitize_log_text
+from core.log_redaction import mask_recipient, sanitize_log_text, storage_safe_recipient
 from services.timeline_service import timeline_service as case_timeline_service
 
 # Import debug mode helper
@@ -154,23 +154,11 @@ def _template_language_key(language: Optional[str]) -> str:
 
 
 def _derive_first_action(deadline: CaseDeadline) -> str:
-    description = (getattr(deadline, "description", "") or "").strip()
-    if description:
-        first_sentence = re.split(r"(?<=[.!?])\s+", description, maxsplit=1)[0].strip()
-        if len(first_sentence) > 140:
-            first_sentence = first_sentence[:137].rstrip() + "..."
-        return first_sentence
+    stored_action = (getattr(deadline, "first_action", None) or "").strip()
+    if stored_action:
+        return stored_action
 
-    deadline_type = str(getattr(deadline, "deadline_type", "") or "").strip().lower()
-    suggestions = {
-        "appeal": "Draft and file the appeal",
-        "filing": "Prepare and submit the filing",
-        "submission": "Gather the required documents and submit them",
-        "response": "Prepare the response and verify deadlines",
-        "hearing": "Review the hearing strategy and supporting documents",
-        "other": "Review the deadline details and plan the next step",
-    }
-    return suggestions.get(deadline_type, "Review the deadline details and plan the next step")
+    return get_deadline_first_action(getattr(deadline, "deadline_type", None))
 
 
 def _build_notification_template_values(
@@ -559,6 +547,7 @@ def send_sms_task(
             with db_session() as db:
                 update_notification_log_by_keys(
                     db=db,
+                    user_id=user_id,
                     deadline_id=deadline_id,
                     days_before=days_left,
                     channel=NotificationChannel.SMS,
@@ -913,9 +902,9 @@ class NotificationService:
                     deadline_id=deadline.id,
                     user_id=deadline.user_id,
                     channel=NotificationChannel.SMS,
-                    recipient=user_preference.phone_number,
+                    recipient=storage_safe_recipient(user_preference.phone_number),
                     days_before=days_left,
-                    message_preview=message,
+                    message_preview=_safe_preview(message),
                     status=status,
                     message_id=message_id,
                     error_message=error,
@@ -1043,9 +1032,9 @@ class NotificationService:
             deadline_id=deadline.id,
             user_id=deadline.user_id,
             channel=NotificationChannel.EMAIL,
-            recipient=user_preference.email,
+            recipient=storage_safe_recipient(user_preference.email),
             days_before=days_left,
-            message_preview=html_content,
+            message_preview=_safe_preview(html_content),
         )
 
         if not created:
@@ -1053,7 +1042,7 @@ class NotificationService:
         # Annotate the reserved record with a placeholder task id BEFORE dispatching,
         # so the worker never races against an uncommitted DB state.
         reserved_log.message_id = "task_pending"
-        reserved_log.message_preview = html_content
+        reserved_log.message_preview = _safe_preview(html_content)
         db.add(reserved_log)
         db.commit()
 
@@ -1126,7 +1115,7 @@ class NotificationService:
 
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel
-            if not has_notification_been_sent(db, deadline.id, days_left, channel):
+            if not has_notification_been_sent(db, deadline.id, days_left, channel, user_id=deadline.user_id):
                 if channel == NotificationChannel.SMS:
                     result = self.send_sms_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)

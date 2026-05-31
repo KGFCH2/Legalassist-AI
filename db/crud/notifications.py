@@ -18,7 +18,7 @@ def get_or_create_notification_log(
     """Atomically create a NotificationLog row under a savepoint.
 
     Uses a nested transaction (savepoint) so the unique constraint on
-    (deadline_id, days_before, channel) is enforced immediately via flush,
+    (user_id, deadline_id, days_before, channel) is enforced immediately via flush,
     and IntegrityError is caught within the function itself.  Without a
     savepoint, two concurrent readers can both flush() the same key under
     READ COMMITTED isolation and both observe a successful insert; the
@@ -31,7 +31,7 @@ def get_or_create_notification_log(
                 deadline_id=deadline_id,
                 user_id=user_id,
                 channel=channel,
-                recipient=recipient,
+                recipient=storage_safe_recipient(recipient),
                 days_before=days_before,
                 status=NotificationStatus.PENDING,
             )
@@ -41,6 +41,7 @@ def get_or_create_notification_log(
         return log, True
     except IntegrityError:
         existing = db.query(NotificationLog).filter(
+            NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
@@ -52,6 +53,7 @@ def get_or_create_notification_log(
 
 def update_notification_log_by_keys(
     db: Session,
+    user_id: int,
     deadline_id: int,
     days_before: int,
     channel: NotificationChannel,
@@ -61,6 +63,7 @@ def update_notification_log_by_keys(
     message_preview: Optional[str] = None,
 ) -> Optional[NotificationLog]:
     log = db.query(NotificationLog).filter(
+        NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -73,7 +76,7 @@ def update_notification_log_by_keys(
     if error_message is not None:
         log.error_message = error_message
     if message_preview is not None:
-        log.message_preview = message_preview
+        log.message_preview = sanitize_log_text(message_preview)
     now = dt.datetime.now(dt.timezone.utc)
     if status == NotificationStatus.SENT:
         log.sent_at = now
@@ -103,7 +106,7 @@ def update_notification_log_by_message_id(
     if error_message is not None:
         log.error_message = error_message
     if message_preview is not None:
-        log.message_preview = message_preview
+        log.message_preview = sanitize_log_text(message_preview)
 
     now = dt.datetime.now(dt.timezone.utc)
     if status == NotificationStatus.DELIVERED:
@@ -135,7 +138,7 @@ def reserve_notification(
         recipient=recipient,
         days_before=days_before,
         status=NotificationStatus.PENDING,
-        message_preview=message_preview,
+        message_preview=sanitize_log_text(message_preview),
     )
     try:
         db.add(log)
@@ -145,6 +148,7 @@ def reserve_notification(
     except IntegrityError:
         db.rollback()
         existing = db.query(NotificationLog).filter(
+            NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
@@ -167,6 +171,7 @@ def update_notification_result(
 ) -> NotificationLog:
     """Upsert a notification log after a delivery attempt."""
     existing = db.query(NotificationLog).filter(
+        NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -175,12 +180,12 @@ def update_notification_result(
     if existing:
         existing.status = status
         if recipient is not None:
-            existing.recipient = recipient
+            existing.recipient = storage_safe_recipient(recipient)
         if attempted_channels is not None:
             existing.attempted_channels = attempted_channels
         existing.message_id = message_id or existing.message_id
         existing.error_message = error_message or existing.error_message
-        existing.message_preview = message_preview or existing.message_preview
+        existing.message_preview = sanitize_log_text(message_preview) or existing.message_preview
         if status == NotificationStatus.SENT:
             existing.sent_at = dt.datetime.now(dt.timezone.utc)
         db.add(existing)
@@ -193,7 +198,7 @@ def update_notification_result(
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient=recipient or "unknown",
+        recipient=storage_safe_recipient(recipient or "unknown"),
         days_before=days_before,
     )[0]
 
@@ -263,8 +268,9 @@ def has_notification_been_sent(
     deadline_id: int,
     days_before: int,
     channel: NotificationChannel,
+    user_id: Optional[int] = None,
 ) -> bool:
-    return db.query(NotificationLog).filter(
+    query = db.query(NotificationLog).filter(
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -273,7 +279,10 @@ def has_notification_been_sent(
             NotificationStatus.DELIVERED,
             NotificationStatus.OPENED,
         ]),
-    ).first() is not None
+    )
+    if user_id is not None:
+        query = query.filter(NotificationLog.user_id == user_id)
+    return query.first() is not None
 
 
 def log_notification(
@@ -292,7 +301,7 @@ def log_notification(
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient=recipient,
+        recipient=storage_safe_recipient(recipient),
         days_before=days_before,
         status=status,
         message_id=message_id,

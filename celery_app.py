@@ -395,7 +395,7 @@ def analyze_document_task(self, user_id, document_id, text=None, file_bytes=None
     db = SessionLocal()
     idemp = IdempotencyManager()
     idempotency_key = f"doc:{user_id}:{document_id}"
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     
     # 1. State Recovery
     state = PipelineStateManager.get_state(db, document_id)

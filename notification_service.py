@@ -103,6 +103,7 @@ from db.crud.notifications import (
 from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.log_redaction import mask_recipient, sanitize_log_text
+from services.timeline_service import timeline_service as case_timeline_service
 
 # Import debug mode helper
 
@@ -769,6 +770,41 @@ class NotificationService:
                 message_preview=message,
             )
 
+        # Atomically create the notification log with the final status.
+        # The unique constraint on (deadline_id, days_before, channel) prevents
+        # duplicate sends from concurrent workers.
+        try:
+            with db.begin_nested():
+                log = NotificationLog(
+                    deadline_id=deadline.id,
+                    user_id=deadline.user_id,
+                    channel=NotificationChannel.SMS,
+                    recipient=user_preference.phone_number,
+                    days_before=days_left,
+                    message_preview=message,
+                    status=status,
+                    message_id=message_id,
+                    error_message=error,
+                )
+                if success:
+                    log.sent_at = datetime.now(timezone.utc)
+                db.add(log)
+                db.flush()
+            try:
+                case_timeline_service.record_notification_event(
+                    db=db,
+                    notification_log=log,
+                    status=NotificationStatus.SENT if success else NotificationStatus.FAILED,
+                    provider="twilio",
+                    metadata={
+                        "message_preview": _safe_preview(message),
+                        "error_message": error,
+                    },
+                )
+            except Exception:
+                logger.exception("sms_notification_timeline_event_failed", deadline_id=deadline.id, user_id=deadline.user_id)
+        except IntegrityError:
+            logger.debug("SMS notification already recorded; skipping", deadline_id=deadline.id, days_before=days_left)
             return NotificationResult(
                 success=status == NotificationStatus.SENT,
                 channel=NotificationChannel.SMS,
@@ -851,15 +887,15 @@ class NotificationService:
         # ====================================================================
         # ASYNCHRONOUS DELIVERY OFFLOAD
         # ====================================================================
-        # Instead of calling self.email_client.send_email() directly, which 
-        # would block the current thread for several seconds while waiting 
+        # Instead of calling self.email_client.send_email() directly, which
+        # would block the current thread for several seconds while waiting
         # for the SendGrid API response, we dispatch a Celery task.
         #
-        # This allows the request (or the periodic check) to complete 
-        # immediately, providing a much smoother experience 
+        # This allows the request (or the periodic check) to complete
+        # immediately, providing a much smoother and "snappier" experience
         # for the end-user or the system scheduler.
         # ====================================================================
-        
+
         logger.info(
             "Offloading email delivery to background task",
             user_id=deadline.user_id,
@@ -880,34 +916,12 @@ class NotificationService:
 
         if not created:
 
-            return NotificationResult(success=False, channel=NotificationChannel.EMAIL, recipient=user_preference.email, error="Already sent")
-
-        if not _should_use_celery(send_email_task):
-            success, message_id, error = self.email_client.send_email(
-                user_preference.email, subject, html_content
-            )
-
-            status = NotificationStatus.SENT if success else NotificationStatus.FAILED
-
-            update_notification_result(
-                db=db,
-                deadline_id=deadline.id,
-                user_id=deadline.user_id,
-                days_before=days_left,
-                channel=NotificationChannel.EMAIL,
-                status=status,
-                message_id=message_id,
-                error_message=error,
-                message_preview=html_content,
-            )
-
-            return NotificationResult(
-                success=success,
-                channel=NotificationChannel.EMAIL,
-                recipient=user_preference.email,
-                message_id=message_id,
-                error=error,
-            )
+        # Annotate the reserved record with a placeholder task id BEFORE dispatching,
+        # so the worker never races against an uncommitted DB state.
+        reserved_log.message_id = "task_pending"
+        reserved_log.message_preview = html_content
+        db.add(reserved_log)
+        db.commit()
 
         task_result = send_email_task.delay(
             to_email=user_preference.email,

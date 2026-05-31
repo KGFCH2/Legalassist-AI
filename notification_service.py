@@ -245,7 +245,11 @@ class SMSClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(
+            lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
+            or getattr(e, "status_code", None) in (429, 503)
+            or getattr(e, "status", None) in (429, 503)
+        ),
         reraise=True
     )
     def _create_message_with_retry(self, to_number: str, message: str):
@@ -310,7 +314,11 @@ class EmailClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(
+            lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
+            or getattr(e, "status_code", None) in (429, 503)
+            or getattr(e, "status", None) in (429, 503)
+        ),
         reraise=True
     )
     def _send_email_with_retry(self, message):
@@ -677,7 +685,12 @@ class NotificationService:
                     <div class="description">
                         "{escaped_desc}"
                     </div>
- 
+
+                    <div class="next-action">
+                        <span class="next-action-label">Suggested Next Action</span>
+                        <span class="deadline-value">{escaped_action}</span>
+                    </div>
+
                     <div style="text-align: center;">
                         <a href="{self.base_url}/cases/{deadline.case_id}" class="cta-button">
                             View Case Dashboard

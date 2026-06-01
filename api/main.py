@@ -140,8 +140,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content={
+                "success": False,
                 "error_code": "VALIDATION_ERROR",
-                "message": exc.detail
+                "message": exc.detail,
+                "status_code": exc.status_code,
             }
         )
     
@@ -156,9 +158,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             content={
+                "success": False,
                 "error_code": "PAYLOAD_TOO_LARGE",
                 "message": exc.detail,
-                "status_code": 413
+                "status_code": 413,
             },
             headers={"Retry-After": "60"}
         )
@@ -174,8 +177,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={
+                "success": False,
                 "error_code": "INTERNAL_SERVER_ERROR",
-                "message": "An internal error occurred"
+                "message": "An internal error occurred",
+                "status_code": 500,
             }
         )
     

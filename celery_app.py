@@ -1390,7 +1390,6 @@ def cleanup_old_tasks() -> Dict[str, str]:
     cleanup_fn = getattr(backend, "cleanup", None)
     backend_name = backend.__class__.__name__ if backend else "unknown"
 
-
     logger.info("cleanup_old_tasks_noop", backend=backend_name, reason="backend_cleanup_not_supported")
     return {"status": "noop", "action": "cleanup", "backend": backend_name}
 

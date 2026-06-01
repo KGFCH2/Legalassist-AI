@@ -1015,7 +1015,6 @@ class NotificationService:
         # Instead of calling self.email_client.send_email() directly, which
         # would block the current thread for several seconds while waiting
         # for the SendGrid API response, we dispatch a Celery task.
-        #
         # This allows the request (or the periodic check) to complete
         # immediately, providing a much smoother and "snappier" experience
         # for the end-user or the system scheduler.

@@ -5,6 +5,8 @@ GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
 """
 from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel
+from typing import Optional
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
@@ -12,6 +14,16 @@ from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
+
+
+class CreateDeadlineRequest(BaseModel):
+    """Request body for POST /api/v1/deadlines"""
+    title: str
+    due_date: datetime
+    description: str = ""
+    priority: str = "medium"
+    case_id: Optional[str] = None
+    reminder_days: int = 7
 
 
 @router.get(
@@ -141,37 +153,32 @@ async def get_deadline_details(
     summary="Create new deadline"
 )
 async def create_deadline(
-    title: str,
-    due_date: datetime,
-    description: str = "",
-    priority: str = "medium",
-    case_id: str = None,
-    reminder_days: int = 7,
+    request: CreateDeadlineRequest,
     current_user: CurrentUser = Depends(get_current_user)
 ) -> DeadlineResponse:
     """Create a new deadline"""
-    
+
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
-        title=title
+        title=request.title
     )
-    
+
     now = datetime.utcnow()
-    days_until = (due_date - now).days
-    
+    days_until = (request.due_date - now).days
+
     return DeadlineResponse(
         deadline_id="dl_new",
         user_id=current_user.user_id,
-        case_id=case_id,
-        title=title,
-        description=description,
-        due_date=due_date,
+        case_id=request.case_id,
+        title=request.title,
+        description=request.description,
+        due_date=request.due_date,
         days_until_due=days_until,
-        priority=priority,
+        priority=request.priority,
         status="pending",
         reminder_enabled=True,
-        reminder_days=reminder_days,
+        reminder_days=request.reminder_days,
         created_at=now
     )
 

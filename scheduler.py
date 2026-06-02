@@ -231,11 +231,13 @@ def check_and_send_reminders():
 
     """
 
+    sent_count = 0
+
     lock_id = f"{_instance_id}:{os.getpid()}"
     with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
         if not has_lock:
             logger.debug("Skipping reminder check - another instance holds the lock")
-            return
+            return sent_count
 
         logger.info("Acquired distributed lock for reminder job")
 
@@ -251,8 +253,6 @@ def check_and_send_reminders():
             # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
             upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
             logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
-
-            sent_count = 0
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
             eligible = []
@@ -305,6 +305,8 @@ def check_and_send_reminders():
             logger.error(f"Error in reminder job: {str(e)}", exc_info=True)
         finally:
             db.close()
+
+    return sent_count
 
 
 def setup_scheduler(scheduler_class):

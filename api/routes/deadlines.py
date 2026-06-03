@@ -261,11 +261,11 @@ async def create_deadline(
     db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Create a new deadline"""
-    
+
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
-        title=title
+        title=request.title
     )
     
     if case_id is None:
@@ -317,7 +317,7 @@ async def create_deadline(
         priority=priority or _deadline_priority(days_until),
         status="active",
         reminder_enabled=True,
-        reminder_days=reminder_days,
+        reminder_days=request.reminder_days,
         created_at=now
     )
 

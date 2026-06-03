@@ -1,8 +1,9 @@
 """
 API Rate Limiting and Middleware
 """
+import json
 import time
-from typing import Callable
+from typing import Callable, Optional, Dict, Any
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 import redis
@@ -58,6 +59,56 @@ return current
             return ttl if ttl > 0 else self.window
         except:
             return self.window
+
+
+class IdempotencyStore:
+    """Stores idempotent operation results in a single authoritative Redis key.
+
+    State metadata references the result key rather than embedding the result,
+    avoiding redundant storage of large payloads across multiple locations.
+    """
+
+    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+        self.redis = redis.from_url(redis_url, decode_responses=True)
+
+    def get_result(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a stored result from the single authoritative key."""
+        try:
+            data = self.redis.get(key)
+            return json.loads(data) if data else None
+        except Exception as e:
+            logger.error("IdempotencyStore.get_result error", error=str(e))
+            return None
+
+    def set_result(self, key: str, result: Dict[str, Any], ttl: int = 3600) -> None:
+        """Store a result in the authoritative key with TTL.
+
+        The result is stored ONCE — state metadata references this key
+        rather than duplicating the payload.
+        """
+        try:
+            self.redis.setex(key, ttl, json.dumps(result))
+        except Exception as e:
+            logger.error("IdempotencyStore.set_result error", error=str(e))
+
+    def try_acquire_lock(self, key: str, ttl: int = 60) -> bool:
+        """Atomically acquire an idempotency lock via SET NX.
+
+        Returns True if the lock was acquired (first request for this key),
+        False if another request is already processing it.
+        """
+        try:
+            return bool(self.redis.set(key + ":lock", "1", nx=True, ex=ttl))
+        except Exception as e:
+            logger.error("IdempotencyStore.try_acquire_lock error", error=str(e))
+            return False
+
+    def release_lock(self, key: str) -> None:
+        """Release the idempotency lock."""
+        try:
+            self.redis.delete(key + ":lock")
+        except Exception as e:
+            logger.error("IdempotencyStore.release_lock error", error=str(e))
 
 
 async def rate_limit_middleware(request: Request, call_next: Callable):

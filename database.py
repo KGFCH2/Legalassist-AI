@@ -1146,7 +1146,7 @@ def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List
     """Compute simple model performance aggregates from `model_feedback` rows.
 
     This is a lightweight aggregator used by the dashboard and can be run periodically.
-    Returns newly-created/updated ModelPerformance rows (in-memory list) but does NOT persist them automatically.
+    Returns newly-created ModelPerformance rows (in-memory list) but does NOT persist them automatically.
     """
     query = db.query(ModelFeedback)
     if task:
@@ -1155,7 +1155,12 @@ def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List
     rows = query.all()
     stats = {}
     for r in rows:
-        key = (r.model_name, r.task, getattr(r.case, "case_type", None), getattr(r.case, "jurisdiction", None))
+        case_type = None
+        jurisdiction = None
+        if r.case_id is not None and r.case is not None:
+            case_type = r.case.case_type
+            jurisdiction = r.case.jurisdiction
+        key = (r.model_name, r.task, case_type, jurisdiction)
         if key not in stats:
             stats[key] = {"samples": 0, "accurate": 0}
         stats[key]["samples"] += 1

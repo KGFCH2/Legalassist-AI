@@ -67,6 +67,9 @@ class CaseDeadline(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False, index=True)
+    priority = Column(String(20), default="medium")  # low, medium, high, critical
+    reminder_enabled = Column(Boolean, default=True)
+    reminder_days = Column(Integer, default=7)
 
     # Relationships
     case = relationship("Case", back_populates="deadlines")
@@ -901,16 +904,22 @@ def create_case_deadline(
 
 
 
-def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
-    """Get all deadlines that are X days away"""
+def get_upcoming_deadlines(db: Session, days_before: int = 30, user_id: Optional[int] = None) -> List[CaseDeadline]:
+    """Get all deadlines that are X days away.
+    
+    If user_id is provided, only deadlines belonging to that user are returned.
+    """
     now = dt.datetime.now(dt.timezone.utc)
     target_date = dt.datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=dt.timezone.utc)
     
-    return db.query(CaseDeadline).filter(
+    query = db.query(CaseDeadline).filter(
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date <= target_date,
         CaseDeadline.deadline_date > now,
-    ).all()
+    )
+    if user_id is not None:
+        query = query.filter(CaseDeadline.user_id == user_id)
+    return query.all()
 
 
 def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
@@ -921,6 +930,14 @@ def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).order_by(CaseDeadline.deadline_date).all()
+
+
+def get_deadline_by_id(db: Session, deadline_id: int, user_id: int) -> Optional[CaseDeadline]:
+    """Get a deadline by ID, enforcing user ownership."""
+    return db.query(CaseDeadline).filter(
+        CaseDeadline.id == deadline_id,
+        CaseDeadline.user_id == user_id,
+    ).first()
 
 
 def has_notification_been_sent(

@@ -830,6 +830,25 @@ def generate_report_task(
     Returns:
         Dict[str, Any]: Metadata about the generated report file.
     """
+    # Defence-in-depth: validate format and report_type against allowlists even
+    # though the HTTP layer enforces Literal types.  Task arguments arrive via
+    # the Celery JSON queue and may bypass the API validation layer in some
+    # code paths (e.g. direct task invocation, replayed tasks, compromised
+    # brokers).  Rejecting unknown values here prevents path traversal and
+    # unexpected template selection inside generate_report().
+    _ALLOWED_FORMATS = {"pdf", "docx", "html"}
+    _ALLOWED_REPORT_TYPES = {"comprehensive", "summary", "legal_brief"}
+
+    if format not in _ALLOWED_FORMATS:
+        raise ValueError(
+            f"Invalid report format {format!r}. "
+            f"Allowed values: {sorted(_ALLOWED_FORMATS)}"
+        )
+    if report_type not in _ALLOWED_REPORT_TYPES:
+        raise ValueError(
+            f"Invalid report_type {report_type!r}. "
+            f"Allowed values: {sorted(_ALLOWED_REPORT_TYPES)}"
+        )
     from db.session import db_session
     from db.models.reports import Report
 

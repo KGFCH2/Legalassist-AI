@@ -53,7 +53,6 @@ DISTRIBUTED LOCKING PATTERN:
 
 ================================================================================
 """
-
 import signal
 import sys
 import os
@@ -147,7 +146,6 @@ notification_dispatch_idempotency = IdempotencyManager()
 def get_notification_service() -> NotificationService:
     """Lazily initialize the notification service singleton."""
     return notification_service._ensure()
-
 
 # Lock configuration
 LOCK_KEY = "legalassist:scheduler:lock"
@@ -547,6 +545,8 @@ def run_system_maintenance_task():
                     # The managed_subprocess finally block will handle termination
         except Exception as e:
             logger.error("scheduler_maintenance_exception", error=sanitize_log_text(str(e)), exc_info=True)
+
+    return sent_count
 
 
 def setup_scheduler(scheduler_class):

@@ -124,10 +124,46 @@ RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
 WHITELIST = {
     "127.0.0.1",
     "::1",
-    "localhost",
-    "internal-admin-service",
-    "internal-ingest-service",
 }
+
+# Trusted reverse-proxy IPs whose X-Forwarded-For header is honoured.
+# Only real IP addresses belong here — service name strings cannot match
+# the ``ip:<addr>`` identifiers produced by resolve_rate_limit_identifier
+# and must never be used as a proxy-trust signal.
+# Add your load-balancer / reverse-proxy IPs via the
+# RATE_LIMIT_TRUSTED_PROXIES environment variable (comma-separated).
+def _load_trusted_proxies() -> frozenset[str]:
+    """Load trusted proxy IPs from settings or environment.
+
+    Only entries that look like IP addresses are accepted.  Service name
+    strings (e.g. ``internal-admin-service``) are rejected because they
+    cannot be verified at the network layer and create a spoofable trust
+    boundary.
+    """
+    import os
+    import ipaddress
+
+    raw = os.getenv("RATE_LIMIT_TRUSTED_PROXIES", "")
+    trusted: set[str] = set()
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+            trusted.add(candidate)
+        except ValueError:
+            logger.warning(
+                "rate_limit_trusted_proxy_ignored_non_ip",
+                entry=candidate,
+                reason="Only IP addresses are accepted as trusted proxies",
+            )
+    # Always trust loopback addresses
+    trusted.update({"127.0.0.1", "::1"})
+    return frozenset(trusted)
+
+
+TRUSTED_PROXIES: frozenset[str] = _load_trusted_proxies()
 
 
 class RateLimitExceeded(HTTPException):
@@ -335,14 +371,21 @@ limiter = DistributedRateLimiter()
 
 
 def is_whitelisted(identifier: str) -> bool:
-    # resolve_rate_limit_identifier returns prefixed strings such as
-    # "ip:127.0.0.1" or "user:42", but WHITELIST stores bare values like
-    # "127.0.0.1".  Strip the type prefix before comparison so that
-    # localhost, loopback, and internal service identifiers are matched
-    # correctly.  The original identifier is also checked to support any
-    # future call sites that pass an unprefixed string directly.
-    _, _, bare_value = identifier.partition(":")
-    return bare_value in WHITELIST or identifier in WHITELIST
+    """Return True when the identifier belongs to a loopback or trusted address.
+
+    ``resolve_rate_limit_identifier`` always returns prefixed identifiers
+    (``ip:<addr>``, ``user:<id>``, ``anon:<token>``).  The previous WHITELIST
+    contained bare strings like ``"127.0.0.1"`` and ``"internal-admin-service"``
+    which could never match a prefixed identifier, making whitelist exemptions
+    silently ineffective.
+
+    Only ``ip:`` prefixed loopback addresses are whitelisted.  Service name
+    strings are not accepted — they cannot be verified at the network layer.
+    """
+    if not identifier.startswith("ip:"):
+        return False
+    raw_ip = identifier[3:]
+    return raw_ip in WHITELIST
 
 
 def resolve_rate_limit_identifier(request: Request) -> str:
@@ -352,6 +395,14 @@ def resolve_rate_limit_identifier(request: Request) -> str:
     1. Valid JWT ``sub`` / ``user_id`` claim  → ``user:<id>``
     2. Direct client IP from ASGI transport   → ``ip:<addr>``
     3. ``X-Forwarded-For`` first hop          → ``ip:<addr>``
+       (only when the direct client IP is in TRUSTED_PROXIES)
+    4. Unique per-request token               → ``anon:<uuid>``
+
+    The function NEVER returns a shared literal such as ``"anonymous"``.
+    ``X-Forwarded-For`` is only trusted when the direct transport-layer
+    peer is a known trusted proxy IP — accepting it unconditionally allows
+    any client to spoof their IP and bypass per-IP rate limits.
+    """
        (only used when the direct client is a known trusted proxy)
     4. Unique per-request token               → ``anon:<uuid>``
 
@@ -383,6 +434,15 @@ def resolve_rate_limit_identifier(request: Request) -> str:
                 pass
 
     # Prefer the direct transport-layer IP — it cannot be spoofed by the client.
+    direct_ip: str | None = None
+    if request.client and request.client.host:
+        direct_ip = request.client.host
+        return f"ip:{direct_ip}"
+
+    # Only trust X-Forwarded-For when the direct peer is a known trusted proxy.
+    # Accepting XFF unconditionally allows any client to forge their IP address
+    # by injecting or prepending values to the header.
+    if direct_ip is not None and direct_ip in TRUSTED_PROXIES:
     if request.client and request.client.host:
         return f"ip:{request.client.host}"
 

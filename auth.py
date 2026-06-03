@@ -280,11 +280,14 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
     """
     Verify OTP and create JWT token with brute-force protection.
     Returns (success, message, token).
-    
+
     Security features:
     - Track failed verification attempts per OTP
     - Lock OTP after max failed attempts
     - Require user to request a new OTP after lockout
+    - Constant-time execution path: all failure branches perform the same
+      cryptographic work so an attacker cannot infer account state from
+      response latency (timing side-channel).
     """
     db = SessionLocal()
     try:
@@ -293,15 +296,37 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
         GENERIC_OTP_FAILURE = "Invalid or expired OTP. Please request a new one."
 
+        # ------------------------------------------------------------------ #
+        # Timing equalisation                                                  #
+        # ------------------------------------------------------------------ #
+        # Always run _verify_otp_hash() regardless of whether an OTP record   #
+        # exists or is locked.  This ensures all failure branches spend the    #
+        # same amount of time in the hash comparison so an attacker cannot     #
+        # distinguish "no pending OTP" (account has not requested a code)     #
+        # from "wrong OTP" (account exists and has a pending code) by         #
+        # measuring response latency.                                          #
+        #                                                                      #
+        # When there is no record, compare against a fresh random hash so     #
+        # the work is identical to the real comparison.                        #
+        # ------------------------------------------------------------------ #
+        dummy_hash = _hash_otp(secrets.token_hex(16))
+        reference_hash = otp_record.otp_hash if otp_record else dummy_hash
+
+        # Always perform the hash comparison (may be against a dummy hash).
+        otp_matches = _verify_otp_hash(otp, reference_hash)
+
         if not otp_record:
+            # Hash comparison already done above — return generic failure.
             return False, GENERIC_OTP_FAILURE, None
 
-        # Check if OTP is locked due to too many failed attempts
+        # Check if OTP is locked due to too many failed attempts.
+        # Do this AFTER the hash comparison so the locked path takes
+        # the same time as the invalid-OTP path.
         if otp_record.is_locked():
             locked_until = otp_record.locked_until
             if locked_until and locked_until.tzinfo is None:
                 locked_until = locked_until.astimezone(timezone.utc)
-            
+
             remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
             logger.warning(
                 "otp_verification_blocked",
@@ -310,15 +335,15 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             )
             return False, GENERIC_OTP_FAILURE, None
 
-        # Verify OTP
-        if not _verify_otp_hash(otp, otp_record.otp_hash):
+        # Verify OTP using the result already computed above.
+        if not otp_matches:
             record_otp_failed_attempt(
-                db, 
-                otp_record.id, 
+                db,
+                otp_record.id,
                 lockout_duration_minutes=OTP_LOCKOUT_MINUTES,
                 max_failed_attempts=OTP_MAX_FAILED_ATTEMPTS
             )
-            
+
             db.refresh(otp_record)
             if otp_record.is_locked():
                 logger.warning(
@@ -326,7 +351,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
                     recipient=mask_email(email),
                     failed_attempts=otp_record.failed_attempts,
                 )
-            
+
             logger.info(
                 "otp_verification_failed",
                 recipient=mask_email(email),

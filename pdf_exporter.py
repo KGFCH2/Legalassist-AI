@@ -772,3 +772,8 @@ def calculate_optimal_font_size(text: str, container_width: float, max_font_size
         ratio = container_width / required_width
         return max(6.0, min(max_font_size, max_font_size * ratio))
     return max_font_size
+
+
+def get_supported_pdf_fonts():
+    """Returns a list of fonts supported by the PDF exporter."""
+    return ["Helvetica", "Arial", "Times"]

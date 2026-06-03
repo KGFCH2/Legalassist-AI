@@ -37,6 +37,10 @@ _REVOCATION_CACHE: dict[str, tuple[bool, float]] = {}
 _REVOCATION_CACHE_TTL: int = 300  # 5 minutes
 _REVOCATION_CACHE_MAX_SIZE: int = 10000
 _REVOCATION_CACHE_LOCK = threading.Lock()
+# In-flight events prevent query storms: when multiple threads miss the cache
+# for the same JTI simultaneously, only one performs the DB lookup; the others
+# wait on the event and read the result from the cache once it is populated.
+_REVOCATION_INFLIGHT: dict[str, threading.Event] = {}
 
 
 def _prune_revocation_cache() -> None:
@@ -64,19 +68,47 @@ def _prune_revocation_cache() -> None:
 def _is_token_revoked_cached(jti: str) -> bool:
     now = datetime.now(timezone.utc).timestamp()
 
+    # Fast path: cache hit under lock
     with _REVOCATION_CACHE_LOCK:
         cached = _REVOCATION_CACHE.get(jti)
         if cached is not None and (now - cached[1]) < _REVOCATION_CACHE_TTL:
             return cached[0]
 
-    from database import SessionLocal, is_token_revoked
-    with SessionLocal() as db:
-        revoked = is_token_revoked(db, jti)
+        # Cache miss — check whether another thread is already querying the DB
+        # for this JTI.  If so, wait for it; if not, claim the query ourselves.
+        if jti in _REVOCATION_INFLIGHT:
+            event = _REVOCATION_INFLIGHT[jti]
+            leader = False
+        else:
+            event = threading.Event()
+            _REVOCATION_INFLIGHT[jti] = event
+            leader = True
 
-    with _REVOCATION_CACHE_LOCK:
-        _REVOCATION_CACHE[jti] = (revoked, now)
-        if len(_REVOCATION_CACHE) > _REVOCATION_CACHE_MAX_SIZE:
-            _prune_revocation_cache()
+    if not leader:
+        # Wait for the leader thread to finish, then read from the cache.
+        event.wait(timeout=5.0)
+        with _REVOCATION_CACHE_LOCK:
+            cached = _REVOCATION_CACHE.get(jti)
+            if cached is not None:
+                return cached[0]
+        # If the cache is still empty after waiting (leader failed), fall
+        # through to perform our own DB query as a safety net.
+
+    try:
+        from database import SessionLocal, is_token_revoked
+        with SessionLocal() as db:
+            revoked = is_token_revoked(db, jti)
+
+        now = datetime.now(timezone.utc).timestamp()
+        with _REVOCATION_CACHE_LOCK:
+            _REVOCATION_CACHE[jti] = (revoked, now)
+            if len(_REVOCATION_CACHE) > _REVOCATION_CACHE_MAX_SIZE:
+                _prune_revocation_cache()
+    finally:
+        if leader:
+            with _REVOCATION_CACHE_LOCK:
+                _REVOCATION_INFLIGHT.pop(jti, None)
+            event.set()
 
     return revoked
 

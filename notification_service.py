@@ -94,6 +94,7 @@ from database import (
     get_notification_template_for_user,
     reserve_notification,
     update_notification_result,
+    SessionLocal,
 )
 from db.crud.notifications import (
     get_or_create_notification_log,
@@ -1007,13 +1008,13 @@ class NotificationService:
             subject, html_content = self.build_email_message(deadline, days_left, _derive_first_action(deadline))
 
 
+
         # ====================================================================
         # ASYNCHRONOUS DELIVERY OFFLOAD
         # ====================================================================
         # Instead of calling self.email_client.send_email() directly, which
         # would block the current thread for several seconds while waiting
         # for the SendGrid API response, we dispatch a Celery task.
-        #
         # This allows the request (or the periodic check) to complete
         # immediately, providing a much smoother and "snappier" experience
         # for the end-user or the system scheduler.

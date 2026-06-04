@@ -26,6 +26,13 @@ legalassist.db
 .vscode/
 .idea/
 
+# Backup files
+*.bak
+
+# Secrets
+.jwt_secret
+secrets/
+
 # Generic
 *.db
 *.log
@@ -37,3 +44,6 @@ requirements.in
 .exports/
 
 .jwt_secret
+
+# Backup files
+*.bak

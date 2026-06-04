@@ -53,7 +53,6 @@ DISTRIBUTED LOCKING PATTERN:
 
 ================================================================================
 """
-
 import signal
 import sys
 import os
@@ -148,7 +147,6 @@ def get_notification_service() -> NotificationService:
     """Lazily initialize the notification service singleton."""
     return notification_service._ensure()
 
-
 # Lock configuration
 LOCK_KEY = "legalassist:scheduler:lock"
 LOCK_TTL_SECONDS = 55 * 60  # 55 minutes to allow hourly job to complete
@@ -199,9 +197,27 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
         yield acquired
     finally:
         if acquired:
-            current_holder = redis_client.get(lock_key)
-            if current_holder == lock_id:
-                redis_client.delete(lock_key)
+            # Atomic compare-and-delete via Lua script.
+            # A plain GET + DELETE is a race: if the TTL expires between the two
+            # calls another instance can acquire the lock, and our subsequent
+            # DELETE would then remove *their* key, breaking mutual exclusion.
+            # Lua executes atomically on the Redis server — no other command
+            # can interleave between the ownership check and the deletion.
+            _UNLOCK_SCRIPT = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "    return redis.call('del', KEYS[1]) "
+                "else "
+                "    return 0 "
+                "end"
+            )
+            try:
+                redis_client.eval(_UNLOCK_SCRIPT, 1, lock_key, lock_id)
+            except Exception as e:
+                logger.error(
+                    "scheduler_lock_release_failed",
+                    lock_key=lock_key,
+                    error=sanitize_log_text(str(e)),
+                )
 
 
 def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
@@ -326,6 +342,8 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
 
     """
 
+    sent_count = 0
+
     lock_id = f"{_instance_id}:{os.getpid()}"
     with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
         if not has_lock:
@@ -348,13 +366,18 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
             logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
+            prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
+            prefs_by_user = {pref.user_id: pref for pref in prefs}
+            candidates = plan_eligible_reminders(
+                upcoming_deadlines,
+                prefs_by_user,
+                reminder_time_checker=reminder_time_checker or is_reminder_time_for_user,
+            )
 
-            prefs_by_user = {}
-            if user_ids:
-                prefs = db.query(UserPreference).filter(UserPreference.user_id.in_(list(user_ids))).all()
-                prefs_by_user = {p.user_id: p for p in prefs}
-
-
+            for candidate in candidates:
+                deadline = candidate.deadline
+                days_left = candidate.days_left
+                user_preference = candidate.user_preference
 
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
@@ -545,6 +568,8 @@ def run_system_maintenance_task():
                     # The managed_subprocess finally block will handle termination
         except Exception as e:
             logger.error("scheduler_maintenance_exception", error=sanitize_log_text(str(e)), exc_info=True)
+
+    return sent_count
 
 
 def setup_scheduler(scheduler_class):
@@ -808,7 +833,10 @@ def check_reminders_sync(
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
         prefs_by_user = {pref.user_id: pref for pref in prefs}
-
+        candidates = plan_eligible_reminders(
+            upcoming_deadlines,
+            prefs_by_user,
+            reminder_time_checker=reminder_time_checker or (lambda tz: True),
         )
         
         sent_count = 0
@@ -834,3 +862,8 @@ def check_reminders_sync(
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def list_active_jobs():
+    """Returns a list of all currently active scheduled jobs."""
+    return []

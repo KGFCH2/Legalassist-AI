@@ -95,21 +95,15 @@ def _days_until_due(due_date: datetime, now: datetime) -> int:
     response_model=UpcomingDeadlinesResponse,
     summary="Get user's upcoming deadlines"
 )
-async def get_upcoming_deadlines(
+async def get_upcoming_deadlines_endpoint(
     days: int = 30,
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls),
 ) -> UpcomingDeadlinesResponse:
-    """
-    Get upcoming deadlines for user
-    
-    - **days**: Look ahead N days (default 30)
-    
-    Returns sorted list of upcoming deadlines by urgency
-    """
-    
+    """Get upcoming deadlines for user"""
+
     logger.info(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
@@ -218,7 +212,7 @@ async def get_deadline_details(
     db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
     """Get complete deadline details"""
-    
+
     logger.info(
         "Fetching deadline",
         deadline_id=deadline_id,
@@ -251,21 +245,23 @@ async def get_deadline_details(
     summary="Create new deadline"
 )
 async def create_deadline(
+    case_id: int,
     title: str,
     due_date: datetime,
     description: str = "",
+    deadline_type: str = "filing",
     priority: str = "medium",
-    case_id: str = None,
+    reminder_enabled: bool = True,
     reminder_days: int = 7,
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Create a new deadline"""
-    
+
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
-        title=title
+        title=request.title
     )
     
     if case_id is None:
@@ -317,7 +313,7 @@ async def create_deadline(
         priority=priority or _deadline_priority(days_until),
         status="active",
         reminder_enabled=True,
-        reminder_days=reminder_days,
+        reminder_days=request.reminder_days,
         created_at=now
     )
 
@@ -328,15 +324,16 @@ async def create_deadline(
     summary="Update deadline"
 )
 async def update_deadline(
-    deadline_id: str,
+    deadline_id: int,
     title: str = None,
     due_date: datetime = None,
+    deadline_type: str = None,
     priority: str = None,
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Update a deadline"""
-    
+
     logger.info(
         "Updating deadline",
         deadline_id=deadline_id,
@@ -347,18 +344,23 @@ async def update_deadline(
     now = datetime.now(timezone.utc)
     effective_due_date = _normalize_utc_datetime(due_date or deadline["deadline_date"])
     days_until = _days_until_due(effective_due_date, now)
+    # Resolve effective priority: use the provided value or fall back to the
+    # stored deadline_type so we always write a non-null value.
+    effective_priority = priority or deadline["deadline_type"] or "manual"
 
     db.execute(
         text("""
             UPDATE case_deadlines
             SET case_title = :title,
                 deadline_date = :due_date,
+                deadline_type = :deadline_type,
                 updated_at = :now
             WHERE id = :deadline_id
         """),
         {
             "title": title or deadline["case_title"],
             "due_date": effective_due_date,
+            "deadline_type": effective_priority,
             "now": now,
             "deadline_id": deadline["id"],
         },
@@ -373,7 +375,7 @@ async def update_deadline(
         description=deadline["description"] or "",
         due_date=effective_due_date or now,
         days_until_due=days_until,
-        priority=priority or _deadline_priority(days_until),
+        priority=effective_priority,
         status=deadline["status"] or ("completed" if deadline["is_completed"] else "active"),
         reminder_enabled=True,
         reminder_days=7,

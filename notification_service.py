@@ -250,6 +250,7 @@ class SMSClient:
             lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
             or getattr(e, "status_code", None) in (429, 503)
             or getattr(e, "status", None) in (429, 503)
+            or any(err in str(e).lower() for err in ("timeout", "connection", "connect", "unreachable"))
         ),
         reraise=True
     )
@@ -319,6 +320,7 @@ class EmailClient:
             lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
             or getattr(e, "status_code", None) in (429, 503)
             or getattr(e, "status", None) in (429, 503)
+            or any(err in str(e).lower() for err in ("timeout", "connection", "connect", "unreachable"))
         ),
         reraise=True
     )
@@ -593,7 +595,11 @@ class NotificationService:
     def __init__(self):
         self.sms_client = SMSClient()
         self.email_client = EmailClient()
-        self.base_url = Config.BASE_URL.rstrip('/')
+        raw_url = Config.BASE_URL
+        if not raw_url:
+            logger.warning("BASE_URL is not configured; using default for notification links")
+            raw_url = "https://legalassist.ai"
+        self.base_url = raw_url.rstrip('/')
 
     def build_sms_message(self, case_title: str, days_left: int, deadline_date: datetime, first_action: Optional[str] = None) -> str:
         """Build SMS reminder message"""
@@ -1039,6 +1045,14 @@ class NotificationService:
         )
 
         if not created:
+            logger.debug("Email notification already reserved; skipping", deadline_id=deadline.id, days_before=days_left)
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.EMAIL,
+                recipient=user_preference.email,
+                message_id=reserved_log.message_id,
+                error="Notification already reserved/sent",
+            )
 
         # Annotate the reserved record with a placeholder task id BEFORE dispatching,
         # so the worker never races against an uncommitted DB state.
@@ -1124,9 +1138,17 @@ class NotificationService:
                     result = self.send_email_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
             else:
-                logger.debug("Notification already sent", 
-                            channel=channel.value, 
-                            days_left=days_left, 
+                logger.info("Notification already sent, reporting as successful",
+                            channel=channel.value,
+                            days_left=days_left,
                             deadline_id=deadline.id)
+                recipient = getattr(user_preference, "phone_number", None) or getattr(user_preference, "email", "unknown")
+                results.append(NotificationResult(
+                    success=True,
+                    channel=channel,
+                    recipient=recipient,
+                    message_id=None,
+                    error=None,
+                ))
 
         return results

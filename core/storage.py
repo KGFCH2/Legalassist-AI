@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Tuple
@@ -10,19 +11,23 @@ ATTACHMENTS_DIR = Path(Config.ATTACHMENTS_DIR)
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 
+def safe_filename(name: str) -> str:
+    name = name or "report"
+    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
+    name = name.strip(" .")
+    return name[:180] if len(name) > 180 else name
+
+
 def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int]:
     """
     Save attachment bytes to the attachments directory.
     Returns (stored_path, size_bytes).
     """
-    # Randomize filename to avoid collisions and sensitive names
     ext = Path(original_filename).suffix or ""
     if Config.ATTACHMENTS_RANDOMIZE_FILENAMES:
         stored_name = f"{uuid.uuid4().hex}{ext}"
     else:
-        # sanitize filename minimally
-        safe_name = Path(original_filename).name.replace("..", "")
-        stored_name = safe_name
+        stored_name = safe_filename(original_filename)
 
     stored_path = ATTACHMENTS_DIR / stored_name
 

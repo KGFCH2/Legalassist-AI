@@ -10,6 +10,7 @@ from db.attachments_service import create_attachment, get_attachments_for_case
 import datetime as dt
 import hashlib
 import threading
+import time
 from config import Config
 try:
     import redis
@@ -370,10 +371,6 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
     db.commit()
     db.refresh(token)
     return token
-
-
-def is_token_revoked(db: Session, jti: str) -> bool:
-    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
 def cleanup_expired_revoked_tokens(db: Session, batch_size: int = 1000) -> int:
@@ -825,9 +822,63 @@ def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
     return db.query(Attachment).filter(Attachment.case_id == case_id).all()
 
 
-def is_token_revoked(db: Session, jti: str) -> bool:
-    """Check if token JTI is in the revocation blacklist"""
+# ====================================================================
+# Revocation cache — Redis-backed coordinated cache to prevent
+# thundering herd on token revocation DB queries during bursts.
+# ====================================================================
+
+_revocation_cache = None
+_revocation_cache_lock = threading.Lock()
+
+
+def _get_revocation_cache():
+    global _revocation_cache
+    if _revocation_cache is not None:
+        return _revocation_cache
+    with _revocation_cache_lock:
+        if _revocation_cache is None:
+            if redis is None:
+                return None
+            redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+            _revocation_cache = redis.from_url(redis_url, decode_responses=True)
+    return _revocation_cache
+
+
+def _is_token_revoked_uncached(db: Session, jti: str) -> bool:
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if token JTI is revoked, using Redis coordinated cache."""
+    cache = _get_revocation_cache()
+    if cache is None:
+        return _is_token_revoked_uncached(db, jti)
+
+    cache_key = f"revoked:{jti}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached == "1"
+
+    lock_key = f"{cache_key}:lock"
+    lock_value = str(time.monotonic_ns())
+
+    if cache.set(lock_key, lock_value, nx=True, ex=10):
+        try:
+            revoked = _is_token_revoked_uncached(db, jti)
+            ttl = 3600 if revoked else 300
+            cache.setex(cache_key, ttl, "1" if revoked else "0")
+            return revoked
+        finally:
+            if cache.get(lock_key) == lock_value:
+                cache.delete(lock_key)
+
+    for _ in range(50):
+        time.sleep(0.02)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached == "1"
+
+    return _is_token_revoked_uncached(db, jti)
 
 
 def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
@@ -837,6 +888,7 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
     db.commit()
     db.refresh(token)
     return token
+
 
 def aggregate_model_performance(db: Session, task: str = None) -> list:
     return []

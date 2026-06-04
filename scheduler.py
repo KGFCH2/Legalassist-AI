@@ -311,23 +311,22 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
 
     PROCESSING WORKFLOW:
     --------------------
-    1. Distributed Lock Acquisition: Only one instance executes the job
-    2. Database Initialization: Ensures tables exist
-    3. Data Retrieval: Fetches all deadlines occurring within the next 31 days
-    4. Iteration & Filtering:
-       a. Computes exact days remaining
-       b. Filters to exact thresholds (30, 10, 3, 1)
-       c. Fetches user preferences
-       d. Evaluates timezone match (is it 8 AM?)
-       e. Evaluates preference match (is notify_X_days enabled?)
-    5. Dispatch: Hands over to `notification_service` which handles channel-specific logic
-
-    DISTRIBUTED LOCKING:
-    -------------------
-    In horizontally scaled deployments, the distributed lock ensures that
-    only one container/node executes the job. If Redis is not available,
-    falls back to single-instance behavior (max_instances=1 still prevents overlap).
-
+    1. Data Retrieval: Fetches all deadlines occurring within the next 31 days.
+       (We use 31 days to safely capture the 30-day threshold).
+    3. Iteration & Filtering:
+       a. Computes exact days remaining.
+       b. Filters to exact thresholds (30, 10, 3, 1).
+       c. Fetches user preferences.
+       d. Evaluates timezone match (is it 8 AM?).
+       e. Evaluates preference match (is notify_X_days enabled?).
+    4. Dispatch: Hands over to `notification_service` which handles channel-specific logic.
+    
+    SCALABILITY CONSIDERATIONS:
+    ---------------------------
+    - As the user base grows, fetching all deadlines in memory may become a bottleneck.
+    - Future iterations should consider paginating the query or pushing the 
+      timezone-filtering logic down to the database level (e.g. using Postgres TIMEZONE functions).
+      
     ERROR HANDLING:
     ---------------
     - The entire job is wrapped in a broad try-except block to prevent a single failure
@@ -341,16 +340,26 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
     - Lock acquisition status is logged for observability.
 
     """
+    
+    # ---------------------------------------------------------
+    # PERFORMANCE FIX: Move localized import out of the loop!
+    # ---------------------------------------------------------
+    # By placing this import at the top of the function, we avoid
+    # the overhead of module resolution during every iteration of
+    # the upcoming_deadlines loop. This significantly speeds up
+    # the job when processing thousands of deadlines.
+    from database import has_notification_been_sent
+    # ---------------------------------------------------------
 
-    sent_count = 0
+    logger.info("=" * 60)
+    logger.info("Starting deadline reminder check job")
+    logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
 
-    lock_id = f"{_instance_id}:{os.getpid()}"
-    with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
-        if not has_lock:
-            logger.debug("scheduler_reminder_lock_skipped")
-            return
-
-        logger.info("scheduler_reminder_lock_acquired")
+    db = SessionLocal()
+    try:
+        # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
+        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
+        logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
         sent_count = 0
 

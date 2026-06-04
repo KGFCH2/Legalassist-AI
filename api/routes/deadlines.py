@@ -158,6 +158,13 @@ async def create_deadline(
     )
     
     now = datetime.utcnow()
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+    if due_date < now.replace(tzinfo=timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Deadline date must be in the future"
+        )
     days_until = (due_date - now).days
     
     return DeadlineResponse(
@@ -198,6 +205,14 @@ async def update_deadline(
     
     # In production, fetch and update from database
     now = datetime.utcnow()
+    if due_date is not None:
+        if due_date.tzinfo is None:
+            due_date = due_date.replace(tzinfo=timezone.utc)
+        if due_date < now.replace(tzinfo=timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Deadline date must be in the future"
+            )
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,

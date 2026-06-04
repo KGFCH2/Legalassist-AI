@@ -886,6 +886,12 @@ def create_case_deadline(
             "case_id not found or not owned by the provided user_id"
         )
 
+    # Validate deadline date is not in the past
+    if deadline_date.tzinfo is None:
+        deadline_date = deadline_date.replace(tzinfo=dt.timezone.utc)
+    if deadline_date < dt.datetime.now(dt.timezone.utc):
+        raise ValueError("Deadline date must be in the future")
+
     deadline = CaseDeadline(
         user_id=user_id,
         case_id=normalized_case_id,

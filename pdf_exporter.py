@@ -4,16 +4,44 @@ Generate professional, multilingual PDF case summaries for export and sharing.
 """
 
 import os
+import re
 import logging
+import unicodedata
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from fpdf import FPDF
+from fpdf.errors import FPDFUnicodeEncodingException
 from database import SessionLocal, Case, CaseDocument, CaseDeadline, CaseTimeline
 from case_manager import get_case_detail
+from db.crud.audit import record_audit_event
 
 logger = logging.getLogger(__name__)
+
+
+# Strict phone-number pattern: requires a separator between digit groups or a
+# country-code prefix, avoiding false matches against case numbers, citations, IDs.
+_PHONE_PATTERN = re.compile(
+    r"(?<!\d)"
+    r"(?:"
+    r"\+\d{1,3}[-.\s]\(?\d{1,5}\)?[-.\s]\d{1,5}(?:[-.\s]\d{1,9})?"      # international
+    r"|"
+    r"\(?\d{3,4}\)?[-.\s]\d{3}[-.\s]\d{4}(?:\s*(?:ext|x|xtn)[.\s]*\d+)?"  # domestic / toll-free
+    r")"
+    r"(?!\d)"
+)
+
+
+def redact_phone_numbers(text: str, replacement: str = "[REDACTED]") -> str:
+    """Replace phone numbers in text with a safe placeholder.
+
+    Uses a strict regex that requires area-code or country-code structure,
+    avoiding false matches against case numbers, citations, or IDs.
+    """
+    if not text:
+        return text
+    return _PHONE_PATTERN.sub(replacement, text)
 
 # Constants for PDF styling
 PRIMARY_COLOR = (44, 62, 80)    # Dark Blue
@@ -24,11 +52,17 @@ LIGHT_GRAY = (245, 245, 245)
 BORDER_COLOR = (200, 200, 200)
 
 # Font configuration
-# We assume DejaVuSans fonts are placed in a 'fonts' directory
+# We assume Unicode-compliant fonts are placed in a 'fonts' directory
 FONT_DIR = Path(__file__).parent / "fonts"
-REGULAR_FONT = "DejaVuSans.ttf"
-BOLD_FONT = "DejaVuSans-Bold.ttf"
-ITALIC_FONT = "DejaVuSans-Oblique.ttf"
+
+# Priority list for Unicode fonts (local assets first, then system fallbacks)
+UNICODE_FONT_CONFIGS = [
+    {"name": "DejaVu", "file": "DejaVuSans.ttf", "style": ""},
+    {"name": "DejaVu", "file": "DejaVuSans-Bold.ttf", "style": "B"},
+    {"name": "DejaVu", "file": "DejaVuSans-Oblique.ttf", "style": "I"},
+    {"name": "Arial Unicode", "file": "ARIALUNI.TTF", "style": "", "system_path": r"C:\Windows\Fonts\ARIALUNI.TTF"},
+    {"name": "Noto Sans", "file": "NotoSans-Regular.ttf", "style": "", "system_path": r"C:\Windows\Fonts\NotoSans-Regular.ttf"},
+]
 
 class LegalAssistPDF(FPDF):
     """
@@ -38,86 +72,199 @@ class LegalAssistPDF(FPDF):
     """
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialize the LegalAssist PDF generator.
+        
+        Extends FPDF to include custom branding, font management, 
+        and robust error handling for asset-dependent features.
+        """
         super().__init__(*args, **kwargs)
+        
+        # Initialize font tracking before attempting setup
+        self.font_availability = {"": False, "B": False, "I": False, "BI": False}
+        
+        # Trigger font registration process
         self._setup_fonts()
+        
+        # Configure page layout and breaks
         self.set_margins(15, 20, 15)
         self.set_auto_page_break(auto=True, margin=20)
 
     def _setup_fonts(self):
-        """Register Unicode fonts. Fallback to standard fonts if files are missing."""
-        font_added = False
+        """
+        Register Unicode-capable fonts (DejaVu, Arial Unicode, Noto Sans) 
+        for multilingual reporting.
+        
+        This method ensures the PDF can render characters from various 
+        scripts (Hindi, Chinese, Bengali, Urdu, etc.) which are common in legal 
+        documents within the target jurisdictions.
+        """
+        logger.info("Initializing font system for LegalAssist PDF...")
+        
+        fonts_registered = []
+        
         try:
-            # Check if font directory exists
-            if not FONT_DIR.exists():
-                os.makedirs(FONT_DIR, exist_ok=True)
-
-            # Define font variants to load
-            fonts_to_load = [
-                ("DejaVu", "", REGULAR_FONT),
-                ("DejaVu", "B", BOLD_FONT),
-                ("DejaVu", "I", ITALIC_FONT),
-            ]
-
-            for family, style, filename in fonts_to_load:
+            # Iterate through our prioritized font configurations
+            for config in UNICODE_FONT_CONFIGS:
+                name = config["name"]
+                style = config["style"]
+                filename = config["file"]
+                
+                # Check 1: Local 'fonts' directory
                 font_path = FONT_DIR / filename
+                
+                # Check 2: System path (if defined and local missing)
+                if not font_path.exists() and "system_path" in config:
+                    sys_path = Path(config["system_path"])
+                    if sys_path.exists():
+                        font_path = sys_path
+                
                 if font_path.exists():
-                    self.add_font(family, style, str(font_path))
-                    font_added = True
+                    try:
+                        # Register the TrueType font
+                        self.add_font(name, style, str(font_path))
+                        self.font_availability[style if name == "DejaVu" else ""] = True
+                        
+                        if name not in fonts_registered:
+                            fonts_registered.append(name)
+                        
+                        logger.debug(f"Successfully registered {name} style '{style}' from {font_path}")
+                    except Exception as e:
+                        logger.error(f"Error registering font {name} from {font_path}: {str(e)}")
                 else:
-                    logger.warning(f"Font file not found: {font_path}. Multilingual support (Hindi/Bengali/Urdu) may be limited.")
-            
-            if font_added:
+                    logger.debug(f"Font asset not found: {filename}")
+
+            # Determine the primary font family based on availability
+            # We prefer DejaVu if available, otherwise Arial Unicode or Noto Sans
+            if "DejaVu" in fonts_registered:
                 self.main_font = "DejaVu"
+            elif "Arial Unicode" in fonts_registered:
+                self.main_font = "Arial Unicode"
+            elif "Noto Sans" in fonts_registered:
+                self.main_font = "Noto Sans"
             else:
-                self.main_font = "Helvetica" # Standard PDF fallback
-        except Exception as e:
-            logger.error(f"Error setting up fonts: {e}")
+                # If no Unicode fonts are found, fallback to Helvetica
+                self.main_font = "Helvetica"
+                logger.error("No Unicode-compliant fonts found. Non-Latin characters (Hindi, Chinese) will render as boxes.")
+                
+            if self.main_font != "Helvetica":
+                logger.info(f"Custom font setup complete. Using '{self.main_font}' as primary family.")
+                
+        except Exception as global_exc:
+            logger.critical(f"Global font setup failure: {global_exc}")
             self.main_font = "Helvetica"
 
-    def _clean(self, txt):
+    def safe_set_font(self, family: str, style: str = '', size: float = 10):
         """
-        Clean text for PDF rendering. 
-        Removed latin-1 encoding to support Unicode characters.
+        Defensively set the font for the current PDF context.
+        
+        Handles fallbacks for bold/italic styles if not available in the 
+        selected Unicode font.
+        """
+        style_norm = style.upper().strip()
+        
+        try:
+            # Special handling for DejaVu which usually has multiple variants
+            if family == "DejaVu":
+                if self.font_availability.get(style_norm, False):
+                    self.set_font(family, style_norm, size)
+                    return
+                # Fallback to Regular if Bold/Italic is missing
+                self.set_font(family, "", size)
+                return
+
+            # For other Unicode fonts (Arial Unicode, Noto Sans), they often 
+            # only have a single comprehensive 'Regular' file that handles everything.
+            if family in ["Arial Unicode", "Noto Sans"]:
+                self.set_font(family, "", size)
+                return
+            
+            # Standard PDF fonts
+            self.set_font(family, style_norm, size)
+            
+        except Exception as e:
+            logger.warning(f"safe_set_font recovery: {family} {style} failed -> using Helvetica")
+            try:
+                self.set_font("Helvetica", "", size)
+            except Exception:
+                logger.error(f"Failed to set Helvetica font: {e}")
+
+    @staticmethod
+    def _is_glyph_supported(char: str) -> bool:
+        """
+        Quick check whether a character is likely renderable by common fonts.
+
+        Rejects Unicode control characters and unassigned codepoints.
+        Allows all Unicode categories except Cc, Cf, Cn, Co, Cs, Zl, Zp.
+        """
+        try:
+            cat = unicodedata.category(char)
+            # Reject control/format/surrogate/private-use/unassigned
+            if cat in ("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"):
+                return False
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _safe_text(self, txt: str) -> str:
+        """
+        Sanitize text for PDF rendering, removing unsupported characters.
+
+        Falls back gracefully when a character cannot be rendered by the
+        current font, preventing FPDFUnicodeEncodingException crashes.
         """
         if not isinstance(txt, str):
             return str(txt) if txt is not None else ""
-        
-        # Handle some common smart quotes/special chars that might still cause issues
-        # but DejaVu Sans handles most Unicode points natively.
+
+        # Replace problematic common Unicode punctuation with ASCII equivalents
         replacements = {
-            '\u201c': '"', '\u201d': '"', 
-            '\u2018': "'", '\u2019': "'", 
-            '…': '...'
+            "\u201c": '"', "\u201d": '"',
+            "\u2018": "'", "\u2019": "'",
+            "\u2013": "-", "\u2014": "--",
+            "\u2026": "...",
         }
         for k, v in replacements.items():
             txt = txt.replace(k, v)
-        
-        # CRITICAL FIX: Removed .encode('latin-1', 'replace').decode('latin-1')
-        # This allows Hindi, Bengali, Urdu and other Unicode characters to pass through.
-        return txt
+
+        # Strip characters that won't render in the current font
+        safe = []
+        for char in txt:
+            if self._is_glyph_supported(char):
+                safe.append(char)
+        return "".join(safe)
 
     def cell(self, w, h=0, txt="", *args, **kwargs):
-        """Override cell to ensure text cleaning"""
-        txt = self._clean(txt)
-        super().cell(w, h, txt, *args, **kwargs)
+        """Override cell, safely handling unsupported Unicode characters."""
+        txt = self._safe_text(txt)
+        try:
+            super().cell(w, h, txt, *args, **kwargs)
+        except FPDFUnicodeEncodingException:
+            # Retry with only ASCII-safe characters
+            safe = txt.encode("ascii", "replace").decode("ascii")
+            super().cell(w, h, safe, *args, **kwargs)
 
     def multi_cell(self, w, h, txt, *args, **kwargs):
-        """Override multi_cell to ensure text cleaning"""
-        txt = self._clean(txt)
-        super().multi_cell(w, h, txt, *args, **kwargs)
+        """Override multi_cell, safely handling unsupported Unicode characters."""
+        txt = self._safe_text(txt)
+        try:
+            super().multi_cell(w, h, txt, *args, **kwargs)
+        except FPDFUnicodeEncodingException:
+            safe = txt.encode("ascii", "replace").decode("ascii")
+            super().multi_cell(w, h, safe, *args, **kwargs)
 
     def header(self):
-        """Add professional header to each page"""
-        # Blue top accent bar
+        """Add professional header to each page with branding and accent."""
+        # Blue top accent bar for a premium look
         self.set_fill_color(*PRIMARY_COLOR)
         self.rect(0, 0, 210, 12, 'F')
         
         self.set_y(18)
-        self.set_font(self.main_font, 'B', 16)
+        # Use safe_set_font to prevent crashes if 'B' style is missing
+        self.safe_set_font(self.main_font, 'B', 16)
         self.set_text_color(*PRIMARY_COLOR)
         self.cell(0, 10, 'LEGALASSIST AI', 0, 0, 'L')
         
-        self.set_font(self.main_font, 'I', 9)
+        self.safe_set_font(self.main_font, 'I', 9)
         self.set_text_color(100, 100, 100)
         self.cell(0, 10, 'INTELLIGENT CASE MANAGEMENT', 0, 1, 'R')
         
@@ -127,13 +274,14 @@ class LegalAssistPDF(FPDF):
         self.ln(8)
 
     def footer(self):
-        """Add professional footer to each page"""
+        """Add professional footer to each page with timestamp and page numbers."""
         self.set_y(-25)
         self.set_draw_color(*BORDER_COLOR)
         self.line(15, self.get_y(), 195, self.get_y())
         self.ln(2)
         
-        self.set_font(self.main_font, 'I', 8)
+        # Use safe_set_font for the italicized footer text
+        self.safe_set_font(self.main_font, 'I', 8)
         self.set_text_color(120, 120, 120)
         
         # Left: Generated Timestamp
@@ -149,27 +297,36 @@ class LegalAssistPDF(FPDF):
         self.cell(15, 10, f'Page {self.page_no()}', 0, 0, 'R')
 
     def section_header(self, title):
-        """Add a styled section header"""
+        """
+        Add a styled section header with a background fill.
+        
+        Args:
+            title: The title text for the section.
+        """
         self.ln(5)
-        self.set_font(self.main_font, 'B', 12)
+        self.safe_set_font(self.main_font, 'B', 12)
         self.set_text_color(*PRIMARY_COLOR)
         self.set_fill_color(*LIGHT_GRAY)
         self.cell(0, 9, f"  {title.upper()}", 0, 1, 'L', True)
         self.ln(3)
 
     def labeled_value(self, label, value, label_width=45):
-        """Add a bold label followed by its value with wrapping support"""
+        """
+        Add a bold label followed by its value with wrapping support.
+        
+        Ensures consistent formatting and safe font handling for labeled fields.
+        """
         if not value:
             value = "N/A"
             
-        self.set_font(self.main_font, 'B', 10)
+        self.safe_set_font(self.main_font, 'B', 10)
         self.set_text_color(*TEXT_COLOR)
         self.cell(label_width, 6, f"{label}:", 0, 0)
         
-        self.set_font(self.main_font, '', 10)
+        self.safe_set_font(self.main_font, '', 10)
         self.set_text_color(*TEXT_COLOR)
         
-        # Use multi_cell for values that might wrap
+        # Use multi_cell for values that might wrap to multiple lines
         self.multi_cell(0, 6, str(value))
         self.ln(1)
 
@@ -178,14 +335,23 @@ class LegalAssistPDF(FPDF):
         self.section_header(label)
 
     def chapter_body(self, text):
-        """Legacy support for original method name"""
-        self.set_font(self.main_font, '', 10)
+        """
+        Add a body paragraph of text with safe font handling.
+        
+        Args:
+            text: The content to be rendered.
+        """
+        self.safe_set_font(self.main_font, '', 10)
         self.set_text_color(*TEXT_COLOR)
         self.multi_cell(0, 6, text)
         self.ln(4)
 
     def draw_status_badge(self, status):
-        """Draw a colored badge for case status"""
+        """
+        Draw a colored badge for case status.
+        
+        Dynamically colors the badge based on the status string.
+        """
         status = status.upper()
         
         # Color based on status
@@ -200,10 +366,10 @@ class LegalAssistPDF(FPDF):
             
         self.set_fill_color(*bg_color)
         self.set_text_color(255, 255, 255)
-        self.set_font(self.main_font, 'B', 9)
+        self.safe_set_font(self.main_font, 'B', 9)
         
         width = self.get_string_width(status) + 10
-        self.set_x(105 - width/2) # Center it
+        self.set_x(105 - width/2) # Center horizontally
         self.cell(width, 7, status, 0, 1, 'C', True)
         self.set_text_color(*TEXT_COLOR)
         self.ln(2)
@@ -228,15 +394,24 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         remedies = case_data.get("remedies")
 
         pdf = LegalAssistPDF()
+        title_str = case.get('title') or case.get('case_number', 'Untitled Case')
+        pdf.set_title(title_str)
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Export Engine")
+        pdf.set_subject(f"Case summary for {case.get('case_number')}")
+        pdf.set_keywords(f"LegalAssist, Case Report, {case.get('case_type')}, {case.get('jurisdiction')}")
         pdf.add_page()
 
         # ==================== CASE HEADER ====================
-        pdf.set_font(pdf.main_font, 'B', 20)
+        # Set large bold font for the title
+        pdf.safe_set_font(pdf.main_font, 'B', 20)
         pdf.set_text_color(*PRIMARY_COLOR)
+        
         title = case.get('title') or case.get('case_number', 'Untitled Case')
         pdf.multi_cell(0, 12, title, align='C')
         
-        pdf.set_font(pdf.main_font, '', 12)
+        # Reference line
+        pdf.safe_set_font(pdf.main_font, '', 12)
         pdf.cell(0, 8, f"Case Reference: {case['case_number']}", 0, 1, 'C')
         
         pdf.ln(2)
@@ -248,18 +423,19 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         pdf.labeled_value('Type of Case', case['case_type'].replace('_', ' ').title())
         pdf.labeled_value('Jurisdiction', case['jurisdiction'])
         
-        # Parse and format date
-        try:
-            created_at = datetime.fromisoformat(case['created_at'].replace('Z', '+00:00'))
+        # Parse and format date with safety check
+        created_at = _parse_dt(case.get('created_at'))
+        if created_at:
             pdf.labeled_value('Date Initiated', created_at.strftime('%d %B %Y'))
-        except:
-            pdf.labeled_value('Date Initiated', case['created_at'])
+        else:
+            pdf.labeled_value('Date Initiated', str(case.get('created_at', '')))
         
+        # Optional description section
         if case.get('description'):
             pdf.ln(2)
-            pdf.set_font(pdf.main_font, 'B', 10)
+            pdf.safe_set_font(pdf.main_font, 'B', 10)
             pdf.cell(0, 6, 'Case Description:', 0, 1)
-            pdf.set_font(pdf.main_font, '', 10)
+            pdf.safe_set_font(pdf.main_font, '', 10)
             pdf.multi_cell(0, 6, case['description'])
 
         # ==================== LEGAL REMEDIES & ADVICE ====================
@@ -267,15 +443,17 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
             pdf.add_page()
             pdf.section_header('Legal Remedies & Analysis')
             
+            # Procedural Context
             if remedies.get('what_happened'):
-                pdf.set_font(pdf.main_font, 'B', 10)
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
                 pdf.set_text_color(*SECONDARY_COLOR)
                 pdf.cell(0, 8, 'PROCEDURAL CONTEXT', 0, 1)
                 pdf.set_text_color(*TEXT_COLOR)
                 pdf.chapter_body(remedies['what_happened'])
             
+            # Appellate Viability
             if remedies.get('can_appeal'):
-                pdf.set_font(pdf.main_font, 'B', 10)
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
                 pdf.set_text_color(*SECONDARY_COLOR)
                 pdf.cell(0, 8, 'APPELLATE VIABILITY', 0, 1)
                 pdf.set_text_color(*TEXT_COLOR)
@@ -287,19 +465,21 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
             pdf.labeled_value('Target Court', remedies.get('appeal_court'))
             pdf.labeled_value('Estimated Costs', remedies.get('cost_estimate'))
             
+            # Recommended Actions
             if remedies.get('first_action'):
                 pdf.ln(4)
                 pdf.set_fill_color(230, 240, 255)
-                pdf.set_font(pdf.main_font, 'B', 11)
+                pdf.safe_set_font(pdf.main_font, 'B', 11)
                 pdf.cell(0, 9, ' RECOMMENDED NEXT STEP', 0, 1, 'L', True)
                 pdf.chapter_body(remedies['first_action'])
 
+            # Statutory Deadlines
             if remedies.get('deadline'):
                 pdf.ln(2)
                 pdf.set_text_color(*ACCENT_COLOR)
-                pdf.set_font(pdf.main_font, 'B', 11)
+                pdf.safe_set_font(pdf.main_font, 'B', 11)
                 pdf.cell(0, 8, 'CRITICAL STATUTORY DEADLINE', 0, 1)
-                pdf.set_font(pdf.main_font, 'B', 12)
+                pdf.safe_set_font(pdf.main_font, 'B', 12)
                 pdf.multi_cell(0, 7, remedies['deadline'])
                 pdf.set_text_color(*TEXT_COLOR)
 
@@ -308,30 +488,29 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         pdf.section_header('Document Repository')
         
         if documents:
+            # Iterate through each case document
             for i, doc in enumerate(documents):
-                pdf.set_font(pdf.main_font, 'B', 11)
+                pdf.safe_set_font(pdf.main_font, 'B', 11)
                 pdf.set_text_color(*PRIMARY_COLOR)
                 pdf.cell(0, 7, f"{i+1}. {doc['document_type'].replace('_', ' ').title()}", 0, 1)
                 
-                pdf.set_font(pdf.main_font, 'I', 9)
+                pdf.safe_set_font(pdf.main_font, 'I', 9)
                 pdf.set_text_color(120, 120, 120)
-                try:
-                    up_date = datetime.fromisoformat(doc['uploaded_at'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    pdf.cell(0, 5, f"   Uploaded: {up_date}", 0, 1)
-                except:
-                    pdf.cell(0, 5, f"   Uploaded: {doc['uploaded_at']}", 0, 1)
+                up_date = _parse_dt(doc.get('uploaded_at'))
+                if up_date:
+                    pdf.cell(0, 5, f"   Uploaded: {up_date.strftime('%d %b %Y')}", 0, 1)
                 
                 if doc.get('summary'):
                     pdf.ln(1)
-                    pdf.set_font(pdf.main_font, '', 10)
+                    pdf.safe_set_font(pdf.main_font, '', 10)
                     pdf.set_text_color(*TEXT_COLOR)
                     pdf.set_x(20)
-                    # This summary might contain Hindi/Bengali/Urdu
+                    # This summary might contain Hindi/Bengali/Urdu Unicode text
                     pdf.multi_cell(0, 5, doc['summary'])
                 
                 pdf.ln(4)
         else:
-            pdf.set_font(pdf.main_font, 'I', 10)
+            pdf.safe_set_font(pdf.main_font, 'I', 10)
             pdf.cell(0, 10, 'No documents associated with this case file.', 0, 1)
 
         # ==================== CASE TIMELINE ====================
@@ -339,41 +518,41 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         pdf.section_header('Case Procedural History')
         
         if timeline:
-            # Sort by date descending
+            # Sort events by date descending for chronological clarity
             try:
                 sorted_timeline = sorted(timeline, key=lambda x: x['event_date'], reverse=True)
-            except:
+            except Exception:
                 sorted_timeline = timeline
             
             for event in sorted_timeline:
-                try:
-                    ev_date = datetime.fromisoformat(event['event_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                except:
-                    ev_date = event['event_date']
-                    
+                ev_dt = _parse_dt(event.get('event_date'))
+                ev_date = ev_dt.strftime('%d %b %Y') if ev_dt else str(event.get('event_date', ''))
                 ev_type = event['event_type'].replace('_', ' ').title()
                 
-                pdf.set_font(pdf.main_font, 'B', 10)
+                # Date column
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
                 pdf.set_text_color(*SECONDARY_COLOR)
                 pdf.cell(40, 7, ev_date, 0, 0)
                 
-                pdf.set_font(pdf.main_font, 'B', 10)
+                # Event type column
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
                 pdf.set_text_color(*PRIMARY_COLOR)
                 pdf.cell(0, 7, ev_type, 0, 1)
                 
+                # Event description with indentation
                 if event.get('description'):
-                    pdf.set_font(pdf.main_font, '', 9)
+                    pdf.safe_set_font(pdf.main_font, '', 9)
                     pdf.set_text_color(*TEXT_COLOR)
                     pdf.set_x(55)
                     pdf.multi_cell(0, 5, event['description'])
                 
                 pdf.ln(3)
                 
-                # Check for page overflow
+                # Check for page overflow to ensure clean breaks
                 if pdf.get_y() > 260:
                     pdf.add_page()
         else:
-            pdf.set_font(pdf.main_font, 'I', 10)
+            pdf.safe_set_font(pdf.main_font, 'I', 10)
             pdf.cell(0, 10, 'Timeline history is currently empty.', 0, 1)
 
         # ==================== DEADLINE MANAGEMENT ====================
@@ -381,23 +560,23 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         pdf.section_header('Upcoming Deadlines & Obligations')
         
         if deadlines:
+            # Split into pending and completed for clearer categorization
             pending = [d for d in deadlines if not d['is_completed']]
             completed = [d for d in deadlines if d['is_completed']]
             
             if pending:
-                pdf.set_font(pdf.main_font, 'B', 11)
+                pdf.safe_set_font(pdf.main_font, 'B', 11)
                 pdf.set_text_color(*ACCENT_COLOR)
                 pdf.cell(0, 8, 'PENDING ACTIONS', 0, 1)
                 pdf.ln(2)
                 
                 for d in sorted(pending, key=lambda x: x['deadline_date']):
-                    try:
-                        d_date = datetime.fromisoformat(d['deadline_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    except:
-                        d_date = d['deadline_date']
-                        
+                    d_dt = _parse_dt(d.get('deadline_date'))
+                    d_date = d_dt.strftime('%d %b %Y') if d_dt else str(d.get('deadline_date', ''))
+
                     days = d.get('days_until', 999)
                     
+                    # Urgency coloring
                     if days <= 3:
                         pdf.set_text_color(*ACCENT_COLOR)
                         tag = " [URGENT]"
@@ -408,13 +587,13 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                         pdf.set_text_color(39, 174, 96) # Green
                         tag = ""
                         
-                    pdf.set_font(pdf.main_font, 'B', 10)
+                    pdf.safe_set_font(pdf.main_font, 'B', 10)
                     pdf.cell(40, 7, d_date, 0, 0)
                     pdf.cell(100, 7, d['deadline_type'].title(), 0, 0)
                     pdf.cell(0, 7, tag, 0, 1, 'R')
                     
                     if d.get('description'):
-                        pdf.set_font(pdf.main_font, 'I', 9)
+                        pdf.safe_set_font(pdf.main_font, 'I', 9)
                         pdf.set_text_color(80, 80, 80)
                         pdf.set_x(55)
                         pdf.multi_cell(0, 5, d['description'])
@@ -422,33 +601,31 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
 
             if completed:
                 pdf.ln(5)
-                pdf.set_font(pdf.main_font, 'B', 11)
+                pdf.safe_set_font(pdf.main_font, 'B', 11)
                 pdf.set_text_color(127, 140, 141)
                 pdf.cell(0, 8, 'COMPLETED MILESTONES', 0, 1)
                 
                 for d in completed:
-                    try:
-                        d_date = datetime.fromisoformat(d['deadline_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    except:
-                        d_date = d['deadline_date']
+                    d_dt = _parse_dt(d.get('deadline_date'))
+                    d_date = d_dt.strftime('%d %b %Y') if d_dt else str(d.get('deadline_date', ''))
                     
-                    pdf.set_font(pdf.main_font, '', 10)
+                    pdf.safe_set_font(pdf.main_font, '', 10)
                     pdf.set_text_color(149, 165, 166)
                     pdf.cell(40, 6, d_date, 0, 0)
                     pdf.cell(0, 6, f"{d['deadline_type'].title()} (Done)", 0, 1)
                     pdf.ln(1)
         else:
-            pdf.set_font(pdf.main_font, 'I', 10)
+            pdf.safe_set_font(pdf.main_font, 'I', 10)
             pdf.cell(0, 10, 'No statutory deadlines tracked for this case.', 0, 1)
 
         # ==================== DISCLAIMER ====================
         pdf.add_page()
         pdf.set_y(100)
-        pdf.set_font(pdf.main_font, 'B', 11)
+        pdf.safe_set_font(pdf.main_font, 'B', 11)
         pdf.set_text_color(*PRIMARY_COLOR)
         pdf.cell(0, 10, 'LEGAL DISCLAIMER & NOTICES', 0, 1, 'C')
         
-        pdf.set_font(pdf.main_font, '', 10)
+        pdf.safe_set_font(pdf.main_font, '', 10)
         pdf.set_text_color(100, 100, 100)
         discl_text = (
             "This briefing document is generated by LegalAssist AI and is provided for informational "
@@ -474,7 +651,13 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
     finally:
         db.close()
 
-def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optional[bytes]:
+def generate_anonymized_pdf(
+    case_id: int,
+    anon_id: str,
+    user_id: int,
+    profile_name: Optional[str] = None,
+    anonymized_data: Optional[Dict[str, Any]] = None,
+) -> Optional[bytes]:
     """
     Generate an anonymized PDF for external legal review.
     Strips all personal identifiers to maintain privacy.
@@ -492,52 +675,98 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
         timeline = db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).all()
+        from services.privacy_redaction import normalize_privacy_profile, get_privacy_profile_definition
+        selected_profile = normalize_privacy_profile(profile_name)
+        profile = get_privacy_profile_definition(selected_profile)
+
+        if anonymized_data is None:
+            try:
+                from case_manager import generate_anonymized_case_data
+                anonymized_data = generate_anonymized_case_data(case_id, profile_name=selected_profile)
+            except Exception:
+                anonymized_data = None
 
         pdf = LegalAssistPDF()
+        pdf.set_title(f"Anonymized Brief - {anon_id}")
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Anonymization Engine")
+        pdf.set_subject("Anonymized Brief for Third-Party Consultation")
+        pdf.set_keywords(f"Anonymized, Consultation, LegalAssist, {selected_profile}")
         pdf.add_page()
 
         # Header for Anonymized Report
-        pdf.set_font(pdf.main_font, 'B', 18)
+        pdf.safe_set_font(pdf.main_font, 'B', 18)
         pdf.set_text_color(*ACCENT_COLOR)
         pdf.cell(0, 15, 'ANONYMIZED CONSULTATION BRIEF', 0, 1, 'C')
         
-        pdf.set_font(pdf.main_font, '', 11)
+        pdf.safe_set_font(pdf.main_font, '', 11)
         pdf.set_text_color(*TEXT_COLOR)
         pdf.cell(0, 8, f"Unique Reference ID: {anon_id}", 0, 1, 'C')
+        pdf.cell(0, 8, f"Privacy profile: {profile.get('label', selected_profile)}", 0, 1, 'C')
         pdf.ln(10)
 
         # Classification info
         pdf.section_header('Case Classification')
-        pdf.labeled_value('Legal Category', case.case_type.title())
-        pdf.labeled_value('Venue Jurisdiction', case.jurisdiction)
-        pdf.labeled_value('Case Status', case.status.value.title())
-        pdf.labeled_value('Inception Date', case.created_at.strftime('%B %Y'))
+        
+        def safe_get(obj, key, default=''):
+            """Safely get value from dict or ORM object"""
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+        
+        pdf.labeled_value('Legal Category', str(safe_get(case, 'case_type', case.case_type)).title())
+        pdf.labeled_value('Venue Jurisdiction', safe_get(case, 'jurisdiction', case.jurisdiction))
+        status_val = safe_get(case, 'status', case.status)
+        if hasattr(status_val, 'value'):
+            status_val = status_val.value
+        pdf.labeled_value('Case Status', str(status_val).title())
+        
+        created_at = safe_get(case, 'created_at', case.created_at)
+        if hasattr(created_at, 'strftime'):
+            pdf.labeled_value('Inception Date', created_at.strftime('%B %Y'))
+        else:
+            pdf.labeled_value('Inception Date', str(created_at)[:7])
 
         # Document abstracts
         pdf.section_header('Evidence Summary')
-        if documents:
+        if anonymized_data and anonymized_data.get("documents"):
+            for doc in anonymized_data["documents"]:
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
+                pdf.cell(0, 7, f"Type: {doc.get('type', 'Document')}", 0, 1)
+                summary = doc.get("summary")
+                if summary:
+                    pdf.safe_set_font(pdf.main_font, '', 10)
+                    pdf.multi_cell(0, 5, str(summary))
+                pdf.ln(3)
+        elif documents:
             for doc in documents:
-                pdf.set_font(pdf.main_font, 'B', 10)
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
                 pdf.cell(0, 7, f"Type: {doc.document_type.value}", 0, 1)
                 if doc.summary:
-                    pdf.set_font(pdf.main_font, '', 10)
-                    pdf.multi_cell(0, 5, doc.summary)
+                    pdf.safe_set_font(pdf.main_font, '', 10)
+                    pdf.multi_cell(0, 5, redact_phone_numbers(doc.summary))
                 pdf.ln(3)
         else:
             pdf.chapter_body("No associated documents for review.")
 
         # Procedure Timeline
         pdf.section_header('Procedural Milestones')
-        if timeline:
+        if anonymized_data and anonymized_data.get("timeline"):
+            for event in anonymized_data["timeline"][:20]:
+                pdf.safe_set_font(pdf.main_font, 'B', 9)
+                pdf.cell(40, 6, str(event.get("event_type", "event")).replace('_', ' ').title(), 0, 0)
+                pdf.safe_set_font(pdf.main_font, '', 9)
+                pdf.cell(0, 6, str(event.get("description") or ""), 0, 1)
+        elif timeline:
             for event in timeline[:20]:
-                pdf.set_font(pdf.main_font, 'B', 9)
+                pdf.safe_set_font(pdf.main_font, 'B', 9)
                 pdf.cell(40, 6, event.event_date.strftime('%d %b %Y'), 0, 0)
-                pdf.set_font(pdf.main_font, '', 9)
+                pdf.safe_set_font(pdf.main_font, '', 9)
                 pdf.cell(0, 6, event.event_type.replace('_', ' ').title(), 0, 1)
         
         # Privacy Footer
         pdf.set_y(-35)
-        pdf.set_font(pdf.main_font, 'I', 8)
+        pdf.safe_set_font(pdf.main_font, 'I', 8)
         pdf.set_text_color(160, 160, 160)
         pdf.multi_cell(0, 4, (
             "NOTICE: This is an anonymized case summary. All PII (Personally Identifiable Information) "
@@ -547,7 +776,25 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         final_out = pdf.output(dest='S')
         if isinstance(final_out, (bytes, bytearray)):
+            record_audit_event(
+                db,
+                actor=f"user:{user_id}",
+                actor_user_id=user_id,
+                action="download_anonymized_pdf",
+                resource=f"case:{case_id}",
+                case_id=case_id,
+                metadata={"privacy_profile": selected_profile, "anonymized_id": anon_id},
+            )
             return bytes(final_out)
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=user_id,
+            action="download_anonymized_pdf",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={"privacy_profile": selected_profile, "anonymized_id": anon_id},
+        )
         return final_out.encode('utf-8')
 
     except Exception as e:
@@ -555,3 +802,22 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
         return None
     finally:
         db.close()
+
+
+def calculate_optimal_font_size(text: str, container_width: float, max_font_size: float = 12.0) -> float:
+    """
+    Dynamically scales down the font size for longer table headers 
+    to prevent text wrapping and clipping in PDF generation.
+    """
+    estimated_char_width = 6.0
+    text_length = len(text)
+    required_width = text_length * estimated_char_width
+    if required_width > container_width:
+        ratio = container_width / required_width
+        return max(6.0, min(max_font_size, max_font_size * ratio))
+    return max_font_size
+
+
+def get_supported_pdf_fonts():
+    """Returns a list of fonts supported by the PDF exporter."""
+    return ["Helvetica", "Arial", "Times"]

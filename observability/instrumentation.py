@@ -3,7 +3,6 @@ Observability instrumentation for Legalassist-AI
 Includes Prometheus metrics, structured logging, and distributed tracing
 """
 
-import json
 import logging
 import time
 import os
@@ -11,26 +10,59 @@ from functools import wraps
 from typing import Callable, Any
 from datetime import datetime
 from contextlib import contextmanager
+from contextvars import ContextVar
 import uuid
 
 from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry, multiprocess, generate_latest
 from prometheus_client import start_http_server
 import structlog
-from jaeger_client import Config
-from opentelemetry import trace, metrics
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.exporter.jaeger.thrift import JaegerExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.instrumentation.flask import FlaskInstrumentor
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry.instrumentation.redis import RedisInstrumentor
+try:
+    from jaeger_client import Config
+except ModuleNotFoundError:  # pragma: no cover - optional in some environments
+    Config = None
+
+try:
+    from opentelemetry import trace, metrics
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+    from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    except Exception:
+        FastAPIInstrumentor = None
+    from opentelemetry.instrumentation.requests import RequestsInstrumentor
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+    from opentelemetry.instrumentation.redis import RedisInstrumentor
+    try:
+        from opentelemetry.instrumentation.celery import CeleryInstrumentor
+    except Exception:
+        CeleryInstrumentor = None
+except ModuleNotFoundError:  # pragma: no cover - optional in some environments
+    trace = None
+    metrics = None
+    PrometheusMetricReader = None
+    JaegerExporter = None
+    TracerProvider = None
+    BatchSpanProcessor = None
+    SERVICE_NAME = None
+    Resource = None
+    MeterProvider = None
+    FlaskInstrumentor = None
+    RequestsInstrumentor = None
+    SQLAlchemyInstrumentor = None
+    RedisInstrumentor = None
 
 # ==================== Prometheus Metrics ====================
 registry = CollectorRegistry()
+_observability_initialized = False
+_sentry_initialized = False
+_REQUEST_ID: ContextVar[str | None] = ContextVar("request_id", default=None)
+_USER_ID: ContextVar[str | None] = ContextVar("user_id", default=None)
+_SESSION_ID: ContextVar[str | None] = ContextVar("session_id", default=None)
 
 # HTTP Metrics
 http_requests_total = Counter(
@@ -207,12 +239,33 @@ user_sessions_active = Gauge(
     registry=registry
 )
 
+async_jobs_pending = Gauge(
+    'async_jobs_pending',
+    'Number of pending async jobs',
+    registry=registry
+)
+
+api_errors_total = Counter(
+    'api_errors_total',
+    'Total API errors',
+    ['endpoint', 'error_type'],
+    registry=registry
+)
+
+feature_flag_events_total = Counter(
+    'feature_flag_events_total',
+    'Feature flag lifecycle events',
+    ['event', 'flag_name', 'surface', 'variant'],
+    registry=registry
+)
+
 
 # ==================== Structured Logging ====================
 def setup_structured_logging():
     """Configure structlog for JSON-formatted logging with correlation IDs"""
     structlog.configure(
         processors=[
+            structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
@@ -243,6 +296,9 @@ log = structlog.get_logger()
 # ==================== Distributed Tracing ====================
 def setup_jaeger_tracing(service_name: str = "legalassist-ai"):
     """Initialize Jaeger distributed tracing"""
+    if trace is None or JaegerExporter is None or TracerProvider is None or BatchSpanProcessor is None or Resource is None:
+        return None
+
     jaeger_exporter = JaegerExporter(
         agent_host_name=os.getenv("JAEGER_AGENT_HOST", "localhost"),
         agent_port=int(os.getenv("JAEGER_AGENT_PORT", "6831")),
@@ -288,9 +344,89 @@ def generate_correlation_id() -> str:
     return str(uuid.uuid4())
 
 
+def bind_request_context(*, request_id: str | None = None, user_id: str | None = None, session_id: str | None = None):
+    """Bind request-scoped context for logs and traces."""
+    if request_id is not None:
+        _REQUEST_ID.set(request_id)
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+    if user_id is not None:
+        _USER_ID.set(user_id)
+        structlog.contextvars.bind_contextvars(user_id=user_id)
+    if session_id is not None:
+        _SESSION_ID.set(session_id)
+        structlog.contextvars.bind_contextvars(session_id=session_id)
+
+
+def get_request_context() -> dict:
+    return {
+        "request_id": _REQUEST_ID.get(),
+        "user_id": _USER_ID.get(),
+        "session_id": _SESSION_ID.get(),
+    }
+
+
+def clear_request_context():
+    _REQUEST_ID.set(None)
+    _USER_ID.set(None)
+    _SESSION_ID.set(None)
+    structlog.contextvars.clear_contextvars()
+
+
+def record_api_error(endpoint: str, error: Exception | str):
+    error_type = error if isinstance(error, str) else type(error).__name__
+    api_errors_total.labels(endpoint=endpoint, error_type=error_type).inc()
+
+
+def set_queue_depth(pending_jobs: int):
+    async_jobs_pending.set(max(0, pending_jobs))
+
+
+def capture_exception(error: Exception, **context):
+    """Capture an exception in Sentry if available, and always log it."""
+    extra_context = {**get_request_context(), **context}
+    log.error("exception_captured", error=str(error), **extra_context)
+
+    try:
+        import sentry_sdk  # type: ignore
+    except ModuleNotFoundError:
+        return
+
+    if sentry_sdk.Hub.current.client is not None:
+        sentry_sdk.capture_exception(error)
+
+
+def setup_sentry_tracing():
+    """Initialize Sentry if configured."""
+    global _sentry_initialized
+    if _sentry_initialized:
+        return
+
+    dsn = os.getenv("SENTRY_DSN")
+    if not dsn:
+        return
+
+    try:
+        import sentry_sdk  # type: ignore
+    except ModuleNotFoundError:
+        log.warning("sentry_sdk_not_installed", configured=True)
+        return
+
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=os.getenv("ENVIRONMENT", "development"),
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+        send_default_pii=False,
+    )
+    _sentry_initialized = True
+
+
 @contextmanager
 def traced_operation(operation_name: str, attributes: dict = None):
     """Context manager for distributed tracing of operations"""
+    if tracer is None:
+        yield None
+        return
+
     with tracer.start_as_current_span(operation_name) as span:
         if attributes:
             for key, value in attributes.items():
@@ -452,6 +588,38 @@ def track_database_operation(operation: str, table: str):
     return decorator
 
 
+def observe_request(endpoint: str, method: str, status_code: int, duration_seconds: float):
+    """Record standardized request metrics."""
+    http_requests_total.labels(method=method, endpoint=endpoint, status=str(status_code)).inc()
+    http_request_duration_seconds.labels(method=method, endpoint=endpoint).observe(duration_seconds)
+
+
+def observe_business_metrics(*, active_cases_count: int | None = None, pending_deadlines_count: int | None = None, active_users_count: int | None = None):
+    if active_cases_count is not None:
+        active_cases.set(max(0, active_cases_count))
+    if pending_deadlines_count is not None:
+        pending_deadlines.set(max(0, pending_deadlines_count))
+    if active_users_count is not None:
+        user_sessions_active.set(max(0, active_users_count))
+
+
+def record_feature_flag_event(event: str, flag_name: str, *, surface: str = "api", variant: str = "control"):
+    """Record feature flag exposure or usage for rollout analysis."""
+    feature_flag_events_total.labels(
+        event=event,
+        flag_name=flag_name,
+        surface=surface,
+        variant=variant,
+    ).inc()
+    log.info(
+        "feature_flag_event",
+        event=event,
+        flag_name=flag_name,
+        surface=surface,
+        variant=variant,
+    )
+
+
 # ==================== Metrics Endpoint ====================
 def get_metrics():
     """Get Prometheus metrics in text format"""
@@ -466,12 +634,46 @@ def get_metrics():
 # ==================== Initialization ====================
 def initialize_observability():
     """Initialize all observability components"""
+    global _observability_initialized
+    if _observability_initialized:
+        return
+
     # Setup structured logging
     setup_structured_logging()
+
+    setup_sentry_tracing()
     
     # Setup distributed tracing
     global tracer
     tracer = setup_jaeger_tracing()
+    # Auto-instrument common libraries when opentelemetry instrumentations are available
+    try:
+        if RequestsInstrumentor is not None:
+            RequestsInstrumentor().instrument()
+            log.info("requests_instrumented")
+    except Exception as e:
+        log.warning("requests_instrumentation_failed", error=str(e))
+
+    try:
+        if SQLAlchemyInstrumentor is not None:
+            SQLAlchemyInstrumentor().instrument()
+            log.info("sqlalchemy_instrumented")
+    except Exception as e:
+        log.warning("sqlalchemy_instrumentation_failed", error=str(e))
+
+    try:
+        if RedisInstrumentor is not None:
+            RedisInstrumentor().instrument()
+            log.info("redis_instrumented")
+    except Exception as e:
+        log.warning("redis_instrumentation_failed", error=str(e))
+
+    try:
+        if CeleryInstrumentor is not None:
+            CeleryInstrumentor().instrument()
+            log.info("celery_instrumented")
+    except Exception as e:
+        log.warning("celery_instrumentation_failed", error=str(e))
     
     # Start Prometheus metrics server
     metrics_port = int(os.getenv("PROMETHEUS_METRICS_PORT", "9090"))
@@ -482,3 +684,4 @@ def initialize_observability():
         log.warning("prometheus_metrics_already_running", error=str(e))
     
     log.info("observability_initialized")
+    _observability_initialized = True

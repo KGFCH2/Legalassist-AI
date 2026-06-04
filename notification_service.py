@@ -595,7 +595,11 @@ class NotificationService:
     def __init__(self):
         self.sms_client = SMSClient()
         self.email_client = EmailClient()
-        self.base_url = Config.BASE_URL.rstrip('/')
+        raw_url = Config.BASE_URL
+        if not raw_url:
+            logger.warning("BASE_URL is not configured; using default for notification links")
+            raw_url = "https://legalassist.ai"
+        self.base_url = raw_url.rstrip('/')
 
     def build_sms_message(self, case_title: str, days_left: int, deadline_date: datetime, first_action: Optional[str] = None) -> str:
         """Build SMS reminder message"""

@@ -6,6 +6,7 @@ Handles delivery tracking and retry logic.
 import logging
 import structlog
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
@@ -53,6 +54,19 @@ def _is_debug_or_testing_mode() -> bool:
     return Config.DEBUG or Config.TESTING
 
 logger = structlog.get_logger(__name__)
+
+
+_SUBJECT_MAX_LEN = 200
+
+
+def _sanitize_subject(text: str) -> str:
+    """Sanitize dynamic content for safe use in email subject lines."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]*>", "", text)
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    text = " ".join(text.split())
+    return text[:_SUBJECT_MAX_LEN]
 
 
 @dataclass
@@ -297,7 +311,7 @@ class NotificationService:
             accent_color = "#1a5490" # Info Blue
             urgency_label = "REMINDER"
 
-        subject = f"⚖️ {urgency_label}: {deadline.case_title} - {escaped_type} Deadline"
+        subject = f"⚖️ {urgency_label}: {_sanitize_subject(deadline.case_title)} - {_sanitize_subject(deadline.deadline_type.title())} Deadline"
         
         html_content = f"""
         <!DOCTYPE html>
@@ -463,7 +477,7 @@ class NotificationService:
                     "link": f"https://legalassist.ai/cases/{deadline.case_id}",
                 }
                 if tmpl.email_subject_template:
-                    subject = render_template(tmpl.email_subject_template, values)
+                    subject = _sanitize_subject(render_template(tmpl.email_subject_template, values))
                 if tmpl.email_html_template:
                     html_content = render_template(tmpl.email_html_template, values)
         except TemplateValidationError as e:

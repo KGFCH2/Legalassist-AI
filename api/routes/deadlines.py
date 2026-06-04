@@ -95,21 +95,15 @@ def _days_until_due(due_date: datetime, now: datetime) -> int:
     response_model=UpcomingDeadlinesResponse,
     summary="Get user's upcoming deadlines"
 )
-async def get_upcoming_deadlines(
+async def get_upcoming_deadlines_endpoint(
     days: int = 30,
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls),
 ) -> UpcomingDeadlinesResponse:
-    """
-    Get upcoming deadlines for user
-    
-    - **days**: Look ahead N days (default 30)
-    
-    Returns sorted list of upcoming deadlines by urgency
-    """
-    
+    """Get upcoming deadlines for user"""
+
     logger.info(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
@@ -218,7 +212,7 @@ async def get_deadline_details(
     db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
     """Get complete deadline details"""
-    
+
     logger.info(
         "Fetching deadline",
         deadline_id=deadline_id,
@@ -251,11 +245,13 @@ async def get_deadline_details(
     summary="Create new deadline"
 )
 async def create_deadline(
+    case_id: int,
     title: str,
     due_date: datetime,
     description: str = "",
+    deadline_type: str = "filing",
     priority: str = "medium",
-    case_id: str = None,
+    reminder_enabled: bool = True,
     reminder_days: int = 7,
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls)
@@ -328,15 +324,16 @@ async def create_deadline(
     summary="Update deadline"
 )
 async def update_deadline(
-    deadline_id: str,
+    deadline_id: int,
     title: str = None,
     due_date: datetime = None,
+    deadline_type: str = None,
     priority: str = None,
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Update a deadline"""
-    
+
     logger.info(
         "Updating deadline",
         deadline_id=deadline_id,

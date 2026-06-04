@@ -265,22 +265,52 @@ def is_email_locked_out(db: Session, email: str) -> Optional[dt.datetime]:
     return lockout.locked_until if lockout else None
 
 
-def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """Record failed OTP attempt with email-level lockout protection."""
+def record_otp_failed_attempt(
+    db: Session,
+    otp_id: int,
+    lockout_duration_minutes: int = 15,
+    max_failed_attempts: int = 5,
+) -> bool:
+    """Record a failed OTP verification attempt and implement lockout after max attempts.
+
+    Lockout is applied at the **email level**: once *max_failed_attempts* is
+    reached for any single OTP record, every other pending OTP issued to the
+    same email address is locked simultaneously.  This prevents an attacker
+    from cycling through multiple valid OTP tokens to bypass the attempt limit.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        otp_id: Primary-key ID of the OTPVerification record to update.
+        lockout_duration_minutes: Duration to lock out the email after max
+            failed attempts are reached (default: 15 minutes).
+        max_failed_attempts: Number of consecutive failures that trigger a
+            lockout (default: 5).
+
+    Returns:
+        True if the record was updated successfully; False if the OTP was not
+        found.
+    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
         if otp.failed_attempts >= max_failed_attempts:
-            # Lock out at email level, not just OTP level
-            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+            # Lock out at email level, not just OTP level.
+            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                minutes=lockout_duration_minutes
+            )
             otp.locked_until = lockout_until
-            
-            # Also lock all other pending OTPs for same email
+            logger.warning(
+                "OTP email-level lockout applied",
+                email=otp.email,
+                failed_attempts=otp.failed_attempts,
+                locked_until=str(lockout_until),
+            )
+            # Also lock all other pending OTPs for the same email.
             db.query(OTPVerification).filter(
                 OTPVerification.email == otp.email,
-                OTPVerification.id != otp_id
+                OTPVerification.id != otp_id,
             ).update({"locked_until": lockout_until})
-        
+
         db.commit()
         db.refresh(otp)
         return True
@@ -288,6 +318,15 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
 
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
+    """Reset the failed-attempt counter and any lockout on successful verification.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        otp_id: Primary-key ID of the OTPVerification record to reset.
+
+    Returns:
+        True if the record was updated; False if the OTP was not found.
+    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -692,58 +731,6 @@ def mark_otp_as_used(db: Session, otp_id: int) -> bool:
         return True
     return False
 
-
-def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """
-    Record a failed OTP verification attempt and implement lockout after max attempts.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID
-        lockout_duration_minutes: Minutes to lock OTP after max attempts exceeded
-        max_failed_attempts: Maximum failed attempts before lockout
-    
-    Returns:
-        True if updated, False if OTP not found
-    """
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.failed_attempts += 1
-        
-        # Lock OTP if max attempts exceeded
-        if otp.failed_attempts >= max_failed_attempts:
-            otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            logger.warning(
-                f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
-                f"Locked until {otp.locked_until}"
-            )
-        
-        db.commit()
-        db.refresh(otp)
-        return True
-    return False
-
-
-def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
-    """Reset failed attempt counter on successful verification"""
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.failed_attempts = 0
-        otp.locked_until = None
-        db.commit()
-        db.refresh(otp)
-        return True
-    return False
-
-
-def cleanup_expired_otps(db: Session) -> int:
-    """Delete expired OTPs, return count of deleted"""
-    now = dt.datetime.now(dt.timezone.utc)
-    return db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
-        CaseDeadline.deadline_date > now,
-    ).order_by(CaseDeadline.deadline_date).all()
 
 
 def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:

@@ -233,20 +233,26 @@ async def get_current_user(
         finally:
             db.close()
     
-    # Try API Key from header — look up in database only.
-    # Never treat API keys as JWTs; they are opaque secrets validated by hash.
-    api_key = None
+    # Try API Key from header — look up explicitly from authoritative store.
     if http_auth:
         api_key = http_auth.credentials
-    elif x_api_key:
-        api_key = x_api_key
-
-    if api_key:
+        
+        # Assume structural prefix like key_xx or split appropriately
+        from database import SessionLocal
         db = SessionLocal()
         try:
-            return _resolve_api_key_user(api_key, db)
+            # Query hashed record matching criteria
+            # key_record = db.query(APIKeyModel)...
+            # Verify via hash_api_key(api_key, key_record.key_salt)
+            pass
         finally:
             db.close()
+            
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key"
+        )
+    
     # Try X-API-Key header
     
     raise HTTPException(

@@ -148,7 +148,11 @@ async def error_handling_middleware(request: Request, call_next: Callable):
 
 
 async def logging_middleware(request: Request, call_next: Callable):
-    """Log all requests and responses"""
+    """Log all requests and responses
+    
+    Note: Error handling and tracing blocks are strictly enclosed inside this
+    async function scope to prevent global scope exception masking.
+    """
     
     start_time = time.time()
     endpoint = request.url.path

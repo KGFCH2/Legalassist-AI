@@ -5,6 +5,7 @@ Uses SQLAlchemy ORM with SQLite for persistence.
 
 import datetime as dt
 import logging
+import threading
 from typing import Optional, List
 from sqlalchemy import (
     create_engine,
@@ -1248,6 +1249,10 @@ def update_user_last_login(db: Session, user_id: int) -> User:
     return user
 
 
+# Thread lock for OTP rate-limit enforcement (single source of truth).
+_otp_rate_limit_lock = threading.Lock()
+
+
 def create_otp_verification(
     db: Session,
     email: str,
@@ -1255,26 +1260,31 @@ def create_otp_verification(
     expires_at: dt.datetime,
     max_requests_per_hour: int = 5,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting"""
-    # Check recent OTPs
-    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-    recent_otps = db.query(OTPVerification).filter(
-        OTPVerification.email == email,
-        OTPVerification.created_at > one_hour_ago,
-    ).count()
+    """Create a new OTP verification record with rate limiting.
 
-    if recent_otps >= max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
+    This is the single source of truth for OTP rate-limit enforcement.
+    All callers (auth.py, API routes, etc.) must go through this function to
+    ensure consistent throttling behavior across the entire application.
+    """
+    with _otp_rate_limit_lock:
+        one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+        recent_otps = db.query(OTPVerification).filter(
+            OTPVerification.email == email,
+            OTPVerification.created_at >= one_hour_ago,
+        ).count()
 
-    otp = OTPVerification(
-        email=email,
-        otp_hash=otp_hash,
-        expires_at=expires_at,
-    )
-    db.add(otp)
-    db.commit()
-    db.refresh(otp)
-    return otp
+        if recent_otps >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
+        otp = OTPVerification(
+            email=email,
+            otp_hash=otp_hash,
+            expires_at=expires_at,
+        )
+        db.add(otp)
+        db.commit()
+        db.refresh(otp)
+        return otp
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:

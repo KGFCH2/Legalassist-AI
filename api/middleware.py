@@ -3,22 +3,35 @@
 The composable security middlewares now live in api.middlewares.* and are
 re-exported here for backward compatibility.
 """
-
-from __future__ import annotations
-
+API Rate Limiting and Middleware
+"""
+import hashlib
 import time
-from typing import Callable
+from typing import Callable, Optional
+from fastapi import Request, HTTPException, status
+from fastapi.responses import JSONResponse
+import redis
 
+# ---------------------------------------------------------------------------
+# Request size enforcement configuration
+# ---------------------------------------------------------------------------
+
+# Maximum allowed request body in bytes (50 MB).
+MAX_BODY_SIZE: int = 50 * 1024 * 1024
+
+# URL path prefixes whose endpoints accept uploaded/streamed bodies and must
+# therefore have strict size enforcement even when Content-Length is absent.
+UPLOAD_PATH_PREFIXES: tuple = (
+    "/api/v1/analyze",
+    "/api/v1/documents",
+    "/api/v1/cases",
+    "/api/v1/reports",
+)
 import structlog
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from api.config import get_settings
-from api.errors import StructuredAPIError, structured_error_response
-from api.middlewares.idempotency import http_idempotency_manager, idempotency_middleware, is_safe_to_cache
-from api.middlewares.rate_limit import rate_limit_middleware
-from api.middlewares.request_size import request_size_limit_middleware
-from api.limiter import limiter
 from observability.instrumentation import (
     bind_request_context,
     capture_exception,
@@ -31,24 +44,95 @@ from observability.instrumentation import (
     use_extracted_trace_context,
 )
 
-try:
-    from db.session import apply_rls_context, clear_rls_context, _is_postgres
-except Exception:
-    apply_rls_context = None
-    clear_rls_context = None
-    _is_postgres = False
-
-try:
-    from api.csrf import validate_csrf as _csrf_validate
-except Exception:
-    _csrf_validate = None
-
-settings = get_settings()
 logger = structlog.get_logger(__name__)
+settings = get_settings()
 
 
-async def add_correlation_id_middleware(request: Request, call_next: Callable):
-    """Attach correlation and request IDs to the request context."""
+class RateLimiter:
+    """Sliding-window rate limiter with per-endpoint and global enforcement."""
+
+    _SLIDING_WINDOW_SCRIPT = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local cutoff = now - (window * 1000)
+
+redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
+local count = redis.call('ZCARD', key)
+
+if count >= limit then
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local retry_after = math.ceil((tonumber(oldest[2]) + window * 1000 - now) / 1000)
+    return {0, retry_after}
+end
+
+redis.call('ZADD', key, now, now .. ':' .. ARGV[4])
+redis.call('PEXPIRE', key, window * 1000 + 1000)
+return {1, 0}
+"""
+
+    def __init__(self):
+        self._redis: Optional[redis.Redis] = None
+        self._script = None
+
+    def _get_client(self) -> redis.Redis:
+        if self._redis is None:
+            self._redis = redis.from_url(settings.REDIS_URL or "redis://localhost:6379/0", decode_responses=True)
+            self._script = self._redis.register_script(self._SLIDING_WINDOW_SCRIPT)
+        return self._redis
+
+    def _endpoint_key(self, user_id: str, path: str) -> str:
+        ep_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+        return f"ratelimit:ep:{ep_hash}:{user_id}"
+
+    def _global_key(self, user_id: str) -> str:
+        return f"ratelimit:global:{user_id}"
+
+    def check(self, key: str, limit: int, window: int) -> tuple[bool, int]:
+        """Returns (allowed, retry_after_seconds)."""
+        try:
+            client = self._get_client()
+            now_ms = int(time.time() * 1000)
+            unique = str(time.monotonic_ns())
+            result = self._script(keys=[key], args=[now_ms, window, limit, unique])
+            allowed = bool(int(result[0]))
+            retry_after = int(result[1])
+            return allowed, retry_after
+        except Exception as e:
+            logger.error("Rate limiter error", error=str(e))
+            return True, 0
+
+    def get_retry_after(self, key: str) -> int:
+        try:
+            client = self._get_client()
+            now_ms = int(time.time() * 1000)
+            oldest = client.zrange(key, 0, 0, withscores=True)
+            if oldest:
+                return max(1, int((oldest[0][1] + 60000 - now_ms) / 1000))
+        except Exception:
+            pass
+        return 60
+
+    def current_count(self, key: str) -> int:
+        try:
+            client = self._get_client()
+            now_ms = int(time.time() * 1000)
+            cutoff = now_ms - 60000
+            client.zremrangebyscore(key, 0, cutoff)
+            return int(client.zcard(key) or 0)
+        except Exception:
+            return 0
+
+
+_limiter: Optional[RateLimiter] = None
+
+
+def get_limiter() -> RateLimiter:
+    global _limiter
+    if _limiter is None:
+        _limiter = RateLimiter()
+    return _limiter
 
     correlation_id = (
         request.headers.get("X-Correlation-Id")
@@ -94,7 +178,7 @@ async def error_handling_middleware(request: Request, call_next: Callable):
             "unhandled_error",
             path=request.url.path,
             method=request.method,
-            error=str(exc),
+            error=sanitize_log_text(str(exc)),
         )
         record_api_error(request.url.path, exc)
         capture_exception(exc, path=request.url.path, method=request.method)
@@ -107,8 +191,12 @@ async def error_handling_middleware(request: Request, call_next: Callable):
 
 
 async def logging_middleware(request: Request, call_next: Callable):
-    """Log request metadata and emit tracing/metrics events."""
-
+    """Log all requests and responses
+    
+    Note: Error handling and tracing blocks are strictly enclosed inside this
+    async function scope to prevent global scope exception masking.
+    """
+    
     start_time = time.time()
     endpoint = request.url.path
     request_id = getattr(
@@ -168,7 +256,7 @@ async def logging_middleware(request: Request, call_next: Callable):
                     duration_ms=round(duration * 1000, 2),
                     request_id=request_id,
                     user_id=user_id_attr,
-                    error=str(exc),
+                    error=sanitize_log_text(str(exc)),
                 )
                 raise
 
@@ -206,86 +294,4 @@ __all__ = [
     "request_size_limit_middleware",
     "settings",
 ]
-
-
-def _request_size_limit_for_path(path: str) -> int:
-    if any(path.startswith(prefix) for prefix in UPLOAD_PATH_PREFIXES):
-        return ValidationConfig.MAX_UPLOAD_SIZE
-    if any(path.startswith(prefix) for prefix in ANALYTICS_PATH_PREFIXES):
-        return ValidationConfig.MAX_ANALYTICS_PAYLOAD
-    return ValidationConfig.MAX_JSON_BODY
-
-
-async def request_size_limit_middleware(request: Request, call_next: Callable):
-    """Reject oversized requests before they reach the application layer."""
-
-    if request.url.path in SKIP_PATHS:
-        return await call_next(request)
-    transfer_encoding = request.headers.get("transfer-encoding", "").lower()
-
-    # For upload endpoints, require Content-Length header (no chunked fallback).
-    content_length = request.headers.get("content-length")
-    max_size = _request_size_limit_for_path(request.url.path)
-
-    if any(request.url.path.startswith(p) for p in UPLOAD_PATH_PREFIXES):
-        # Must provide explicit content-length for uploads
-        if content_length is None:
-            return JSONResponse(
-                status_code=status.HTTP_411_LENGTH_REQUIRED,
-                content={
-                    "error_code": "LENGTH_REQUIRED",
-                    "message": "Content-Length header is required for upload endpoints.",
-                },
-            )
-
-    # Reject explicit chunked transfer encoding as ambiguous
-    if "chunked" in transfer_encoding:
-        return JSONResponse(
-            status_code=status.HTTP_411_LENGTH_REQUIRED,
-            content={
-                "error_code": "CHUNKED_ENCODING_NOT_SUPPORTED",
-                "message": "Chunked transfer encoding is not supported. Provide Content-Length header.",
-            },
-        )
-
-    content_length = request.headers.get("content-length")
-    if content_length is None:
-        return JSONResponse(
-            status_code=status.HTTP_411_LENGTH_REQUIRED,
-            content={
-                "error_code": "LENGTH_REQUIRED",
-                "message": "Content-Length header is required for all requests.",
-            },
-        )
-
-    try:
-        content_length_bytes = int(content_length)
-    except (TypeError, ValueError):
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "error_code": "INVALID_CONTENT_LENGTH",
-                "message": "Content-Length must be a valid integer.",
-            },
-        )
-
-    max_size = _request_size_limit_for_path(request.url.path)
-    if content_length_bytes > max_size:
-        logger.warning(
-            "request_size_limit_exceeded",
-            path=request.url.path,
-            content_length=content_length_bytes,
-            max_size=max_size,
-            size_mb=round(content_length_bytes / 1024 / 1024, 2),
-        )
-        return JSONResponse(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            content={
-                "error_code": "PAYLOAD_TOO_LARGE",
-                "message": (
-                    f"Request body too large: {round(content_length_bytes / 1024 / 1024, 2)} MB "
-                    f"(max {round(max_size / 1024 / 1024, 2)} MB)"
-                ),
-            },
-        )
 

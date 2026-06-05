@@ -513,6 +513,12 @@ if not _redis_env:
     celery_app.conf.__setitem__ = lambda k, v: None
     celery_app.AsyncResult = lambda *args, **kwargs: SimpleNamespace(state="PENDING", result=None, status="PENDING")
     celery_app.main = "legalassist"
+    def _dummy_task(*args, **kwargs):
+        def _decorator(func):
+            func.run = func
+            return func
+        return _decorator
+    celery_app.task = _dummy_task
     REDIS_URL = ""
 else:
     REDIS_URL = _redis_env
@@ -916,7 +922,6 @@ def extract_document_text_task(
             payload={"text_length": len(extracted_text)},
         )
 
-        return {
         result = {
             "user_id": user_id,
             "document_id": document_id,
@@ -1030,7 +1035,6 @@ def summarize_document_task(
             payload={"key_points_count": len(key_points)},
         )
 
-        return {
         result = {
             **extraction_result,
             "summary_text": summary_text,
@@ -1143,7 +1147,6 @@ def extract_remedies_task(
             payload={"remedies_count": len(remedies_list)},
         )
 
-        return {
         result = {
             **summarization_result,
             "remedies": remedies_list,

@@ -105,6 +105,10 @@ class Config:
     API_BASE_URL = _get_val("API_BASE_URL", "")
     API_REQUEST_TIMEOUT_SECONDS = float(_get_val("API_REQUEST_TIMEOUT_SECONDS", "5.0"))
     
+    # --- Celery Settings ---
+    CELERY_TASK_TIMEOUT = _get_int_env("CELERY_TASK_TIMEOUT", 3600)
+    CELERY_TASK_SOFT_TIME_LIMIT = _get_int_env("CELERY_TASK_SOFT_TIME_LIMIT", 3300)
+    
     # --- WebSocket Settings ---
     ENABLE_WEBSOCKET = _get_bool_env("ENABLE_WEBSOCKET", True)
     WEBSOCKET_RATE_LIMIT_REQUESTS = _get_int_env("WEBSOCKET_RATE_LIMIT_REQUESTS", 30)

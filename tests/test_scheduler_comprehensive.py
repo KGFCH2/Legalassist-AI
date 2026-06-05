@@ -32,93 +32,14 @@ from scheduler import (
     get_scheduler,
 )
 
+from db.session import init_db
+
 @pytest.fixture(scope="function")
 def test_db():
-    """Create an in-memory test database"""
+    """Create an in-memory test database with migrated tables"""
     engine = create_engine("sqlite:///:memory:")
-    with engine.begin() as connection:
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY,
-                email VARCHAR(255) NOT NULL
-            )
-            """
-        )
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE cases (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                case_number VARCHAR(255) NOT NULL,
-                case_type VARCHAR(255) NOT NULL,
-                jurisdiction VARCHAR(255) NOT NULL,
-                status VARCHAR(50) NOT NULL,
-                title VARCHAR(255),
-                version INTEGER NOT NULL DEFAULT 1,
-                created_at DATETIME,
-                updated_at DATETIME
-            )
-            """
-        )
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE case_deadlines (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                case_id INTEGER NOT NULL,
-                case_title VARCHAR(255) NOT NULL,
-                deadline_date DATETIME NOT NULL,
-                deadline_type VARCHAR(255) NOT NULL,
-                description TEXT,
-                created_at DATETIME,
-                updated_at DATETIME,
-                is_completed BOOLEAN DEFAULT 0 NOT NULL
-            )
-            """
-        )
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE user_preferences (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER NOT NULL UNIQUE,
-                phone_number VARCHAR(255),
-                email VARCHAR(255) NOT NULL,
-                notification_channel VARCHAR(50) DEFAULT 'both',
-                timezone VARCHAR(255) DEFAULT 'UTC',
-                notify_30_days BOOLEAN DEFAULT 1,
-                notify_10_days BOOLEAN DEFAULT 1,
-                notify_3_days BOOLEAN DEFAULT 1,
-                notify_1_day BOOLEAN DEFAULT 1,
-                holiday_aware_reminders BOOLEAN DEFAULT 0,
-                holiday_country VARCHAR(255),
-                holiday_region VARCHAR(255),
-                holiday_calendar_json TEXT,
-                created_at DATETIME,
-                updated_at DATETIME
-            )
-            """
-        )
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE notification_logs (
-                id INTEGER PRIMARY KEY,
-                deadline_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                channel VARCHAR(50) NOT NULL,
-                status VARCHAR(50),
-                recipient VARCHAR(255) NOT NULL,
-                days_before INTEGER NOT NULL,
-                message_id VARCHAR(255),
-                error_message TEXT,
-                message_preview TEXT,
-                sent_at DATETIME,
-                delivered_at DATETIME,
-                failed_at DATETIME,
-                created_at DATETIME
-            )
-            """
-        )
+    with patch("db.session.engine", engine), patch("db.session._is_sqlite", True):
+        init_db()
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = TestingSessionLocal()
     yield db
@@ -153,26 +74,19 @@ class TestSchedulerComprehensive:
                 phone_number=f"+91{days}00000000",
                 notification_channel=NotificationChannel.BOTH
             )
-            # Mock dependencies and underlying send functions (not the whole service)
-            with patch("scheduler.init_db"), \
-                 patch("scheduler.SessionLocal", return_value=test_db), \
-                 patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
-                 patch("scheduler.is_reminder_time_for_user", return_value=True):
-
-        # Mock dependencies and underlying send functions (not the whole service)
         with patch("scheduler.SessionLocal", return_value=test_db), \
-             patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
+             patch("scheduler.notification_service.send_with_fallback") as mock_send_reminders, \
              patch("scheduler.is_reminder_time_for_user", return_value=True):
-            
-            # send_reminders returns a list of NotificationResult objects
-            mock_send_reminders.return_value = [
-                SimpleNamespace(success=True, channel=NotificationChannel.SMS, recipient="+91test", message_id="sms_123", error=None),
-                SimpleNamespace(success=True, channel=NotificationChannel.EMAIL, recipient="test@example.com", message_id="email_123", error=None),
-            ]
-            
+            mock_send_reminders.return_value = SimpleNamespace(
+                success=True,
+                channel=NotificationChannel.EMAIL,
+                recipient="test@example.com",
+                message_id="email_123",
+                error=None,
+            )
+
             check_and_send_reminders()
-            
-            # Verify it called send_reminders 4 times (once per threshold)
+
             assert mock_send_reminders.call_count == 4
 
     def test_check_and_send_reminders_continues_after_send_failure(self):
@@ -209,19 +123,17 @@ class TestSchedulerComprehensive:
 
         call_count = {"value": 0}
 
-        def fake_send_reminders(db, deadline, user_preference, days_left):
+        def fake_send_with_fallback(db, deadline, user_preference, days_left):
             call_count["value"] += 1
             if call_count["value"] == 1:
                 raise RuntimeError("boom")
-            return [
-                SimpleNamespace(
-                    success=True,
-                    channel=NotificationChannel.SMS,
-                    recipient=user_preference.phone_number,
-                    message_id="sms_123",
-                    error=None,
-                )
-            ]
+            return SimpleNamespace(
+                success=True,
+                channel=NotificationChannel.SMS,
+                recipient=user_preference.phone_number,
+                message_id="sms_123",
+                error=None,
+            )
 
         with patch("scheduler.init_db"), \
              patch("scheduler.SessionLocal", return_value=fake_db), \
@@ -229,7 +141,7 @@ class TestSchedulerComprehensive:
                  (deadlines[0], 30, prefs[0]),
                  (deadlines[1], 30, prefs[1]),
              ]), \
-             patch("scheduler.notification_service.send_reminders", side_effect=fake_send_reminders) as mock_send_reminders, \
+             patch("scheduler.notification_service.send_with_fallback", side_effect=fake_send_with_fallback) as mock_send_reminders, \
              patch("scheduler.logger.error") as mock_error:
             check_and_send_reminders()
 
@@ -380,9 +292,9 @@ class TestSchedulerComprehensive:
         event.listen(test_db.bind, "before_cursor_execute", capture_sql)
         try:
             with patch("scheduler.SessionLocal", return_value=test_db), \
-                 patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
+                 patch("scheduler.notification_service.send_with_fallback") as mock_send_reminders, \
                  patch("scheduler.is_reminder_time_for_user", return_value=True):
-                mock_send_reminders.return_value = [MagicMock(success=True)]
+                mock_send_reminders.return_value = MagicMock(success=True)
                 check_and_send_reminders()
         finally:
             event.remove(test_db.bind, "before_cursor_execute", capture_sql)
@@ -415,7 +327,7 @@ class TestSchedulerComprehensive:
         with patch("scheduler.SessionLocal", return_value=test_db), \
              patch("scheduler.notification_service") as mock_service:
             check_and_send_reminders()
-            assert mock_service.send_sms_reminder.call_count == 0
+            assert mock_service.send_with_fallback.call_count == 0
 
     def test_check_and_send_reminders_skips_already_sent_notifications(self, test_db):
         """Test that a previously sent reminder is not dispatched again."""
@@ -456,13 +368,11 @@ class TestSchedulerComprehensive:
         )
 
         with patch("scheduler.SessionLocal", return_value=test_db), \
-             patch("scheduler.notification_service.send_sms_reminder") as mock_sms_reminder, \
-             patch("scheduler.notification_service.send_email_reminder") as mock_email_reminder, \
+             patch("scheduler.notification_service.send_with_fallback") as mock_fallback_sender, \
              patch("scheduler.is_reminder_time_for_user", return_value=True):
             check_and_send_reminders()
 
-        mock_sms_reminder.assert_not_called()
-        mock_email_reminder.assert_not_called()
+        mock_fallback_sender.assert_not_called()
 
     def test_get_scheduler_initialization(self):
         """Test scheduler singleton initialization"""
@@ -523,7 +433,7 @@ class TestSchedulerComprehensive:
         
         with patch("scheduler.SessionLocal", return_value=test_db), \
              patch("scheduler.notification_service") as mock_service:
-            mock_service.send_reminders.return_value = [MagicMock(success=True)]
+            mock_service.send_with_fallback.return_value = MagicMock(success=True)
             
             # Target 1 day (should not find the 30 day deadline)
             count = check_reminders_sync(target_days=1)
@@ -532,3 +442,30 @@ class TestSchedulerComprehensive:
             # Target 30 days
             count = check_reminders_sync(target_days=30)
             assert count == 1
+
+    def test_check_and_send_reminders_handles_exception_safely(self):
+        """Test that check_and_send_reminders handles database query exceptions gracefully without raising UnboundLocalError"""
+        with patch("scheduler.init_db"), \
+             patch("scheduler.SessionLocal") as mock_session_local, \
+             patch("scheduler.distributed_lock") as mock_lock, \
+             patch("scheduler.logger.error") as mock_error:
+            
+            # Make the lock succeed
+            mock_lock.return_value.__enter__.return_value = True
+            mock_lock.return_value.__exit__.return_value = False
+            
+            mock_db = MagicMock()
+            mock_session_local.return_value = mock_db
+            
+            # Force get_upcoming_deadlines to raise an exception
+            with patch("scheduler.get_upcoming_deadlines", side_effect=RuntimeError("Database failure")):
+                # This should run without raising UnboundLocalError and return 0
+                sent_count = check_and_send_reminders()
+                
+                assert sent_count == 0
+                mock_error.assert_called_with(
+                    "scheduler_reminder_job_failed",
+                    error="Database failure",
+                    exc_info=True
+                )
+

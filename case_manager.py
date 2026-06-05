@@ -56,6 +56,7 @@ from database import (
     get_attachments_for_case,
     save_case_note_draft,
 )
+from core.deadline_engine import get_deadline_first_action
 from db.case_service import get_case_note, publish_case_note, get_case_note_history
 from services.timeline_service import timeline_service as _timeline_service
 from services.deadlines_auto_creator import (
@@ -320,7 +321,7 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             for event in timeline
         ]
 
-        comments = get_case_comments(db, case_id)
+        comments = get_case_comments(db, case_id, user_id)
         comments_list = [
             {
                 "id": comment.id,
@@ -530,13 +531,16 @@ def upload_case_attachment(
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
+        # Sanitize filename to prevent directory traversal
+        safe_filename = os.path.basename(filename)
+
         # Save file to storage
-        stored_path, size = save_attachment(file_bytes, filename)
+        stored_path, size = save_attachment(file_bytes, safe_filename)
 
         att = create_attachment(
             db=db,
             user_id=user_id,
-            original_filename=filename,
+            original_filename=safe_filename,
             stored_path=stored_path,
             content_type=content_type,
             size_bytes=size,
@@ -587,12 +591,15 @@ def upload_case_document_file(
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
-        stored_path, size = save_attachment(file_bytes, filename)
+        # Sanitize filename to prevent directory traversal
+        safe_filename = os.path.basename(filename)
+
+        stored_path, size = save_attachment(file_bytes, safe_filename)
 
         att = create_attachment(
             db=db,
             user_id=user_id,
-            original_filename=filename,
+            original_filename=safe_filename,
             stored_path=stored_path,
             content_type=content_type,
             size_bytes=size,
@@ -849,6 +856,7 @@ def add_manual_deadline(
     deadline_date: datetime,
     deadline_type: str,
     description: Optional[str] = None,
+    court_name: Optional[str] = None,
 ) -> Optional[CaseDeadline]:
     """Add a manual deadline to a case"""
     if deadline_date.tzinfo is None:
@@ -856,6 +864,12 @@ def add_manual_deadline(
     
     db = SessionLocal()
     try:
+        # Validate deadline date is not in the past
+        if deadline_date.tzinfo is None:
+            deadline_date = deadline_date.replace(tzinfo=timezone.utc)
+        if deadline_date < datetime.now(timezone.utc):
+            return None
+
         # Verify case ownership
         case = get_case_by_id(db, case_id)
         if not case or case.user_id != user_id:
@@ -865,8 +879,10 @@ def add_manual_deadline(
             user_id=user_id,
             case_id=case_id,
             case_title=case_title,
+            court_name=court_name,
             deadline_date=deadline_date,
             deadline_type=deadline_type,
+            first_action=get_deadline_first_action(deadline_type),
             description=description,
         )
         db.add(deadline)

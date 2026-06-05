@@ -9,8 +9,12 @@ from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
+from sqlalchemy.orm import Session
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
+from api.dependencies import get_db_rls
+from api.limiter import RateLimit
+from db.models.cases import Attachment
 
 try:
     from celery_app import analyze_document_task, TaskStatus, enqueue_task_from_http_request
@@ -22,10 +26,10 @@ from api.validation import (
     validate_file_upload,
     validate_file_url,
     validate_text_input,
-    validate_file_upload_streaming,
     ValidationConfig,
+    PayloadTooLargeError,
 )
-from api.job_registry import register_job_owner
+from api.job_registry import register_job_owner, get_job_owner
 from config import Config
 import structlog
 
@@ -46,6 +50,12 @@ def validate_file_path(file_path: str) -> str:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="file_path could not be resolved",
+        )
+
+    if not resolved.exists():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path does not exist",
         )
 
     allowed_dirs = [
@@ -81,12 +91,14 @@ def validate_file_path(file_path: str) -> str:
     "/document",
     response_model=AnalysisJobResponse,
     summary="Analyze document asynchronously",
-    description="Upload or provide document text for analysis. Returns immediately with job ID."
+    description="Upload or provide document text for analysis. Returns immediately with job ID.",
+    dependencies=[Depends(RateLimit(requests=10, window=300))],
 )
 async def analyze_document(
     request: DocumentAnalysisRequest,
     http_request: Request,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
 ) -> AnalysisJobResponse:
     """
     Analyze a legal document asynchronously
@@ -117,6 +129,18 @@ async def analyze_document(
     if request.file_path:
         from api.validation import validate_upload_file_path
         request.file_path = validate_upload_file_path(request.file_path)
+    
+    # Ownership verification: the user must own an Attachment record for this path
+    if safe_path:
+        attachment = db.query(Attachment).filter(
+            Attachment.stored_path == safe_path,
+            Attachment.user_id == int(current_user.user_id),
+        ).first()
+        if not attachment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this file",
+            )
     
     # Generate document ID and job ID
     document_id = str(uuid.uuid4())
@@ -219,6 +243,13 @@ async def cancel_analysis(
 ) -> dict:
     """Cancel an analysis job"""
     
+    owner_id = get_job_owner(job_id)
+    if owner_id is not None and owner_id != int(current_user.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to cancel this job",
+        )
+    
     success = TaskStatus.revoke_task(job_id)
     
     if success:
@@ -234,7 +265,8 @@ async def cancel_analysis(
     "/upload",
     response_model=AnalysisJobResponse,
     summary="Upload document file for analysis",
-    description="Upload a PDF, Word, or text file for legal analysis."
+    description="Upload a PDF, Word, or text file for legal analysis.",
+    dependencies=[Depends(RateLimit(requests=5, window=300))],
 )
 async def upload_document_file(
     http_request: Request,
@@ -261,22 +293,28 @@ async def upload_document_file(
             allowed_mime_types=ValidationConfig.ALLOWED_MIME_TYPES,
         )
         
-        # Validate file size during streaming read
-        bytes_read = await validate_file_upload_streaming(
-            file,
-            max_size=ValidationConfig.MAX_UPLOAD_SIZE,
-        )
-        
+        # Rewind the stream after validation (magic-bytes check in
+        # validate_file_upload reads from the underlying SpooledTemporaryFile
+        # directly, which can desync the UploadFile async wrapper).
+        await file.seek(0)
+
+        # Read file content into memory, then validate size from the buffer.
+        file_content = await file.read()
+        file_bytes_read = len(file_content)
+
+        if file_bytes_read > ValidationConfig.MAX_UPLOAD_SIZE:
+            raise PayloadTooLargeError(
+                detail=f"Upload exceeded maximum size limit of {round(ValidationConfig.MAX_UPLOAD_SIZE / 1024 / 1024, 2)} MB"
+            )
+
         logger.info(
             "File uploaded successfully",
             user_id=current_user.user_id,
             filename=file.filename,
-            size_bytes=bytes_read,
+            size_bytes=file_bytes_read,
             document_type=document_type,
         )
         
-        # Read file content
-        file_content = await file.read()
         file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
 
         # MIME sniff first bytes to catch renamed binaries (e.g. PDF → .txt)

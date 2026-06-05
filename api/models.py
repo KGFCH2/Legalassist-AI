@@ -2,7 +2,7 @@
 Pydantic models for API requests/responses
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, EmailStr
 
 
@@ -263,12 +263,12 @@ class AnonymizedShareResponse(BaseModel):
 class ReportGenerationRequest(BaseModel):
     """Request to generate a report"""
     case_id: str
-    report_type: str = "comprehensive"  # comprehensive, summary, legal_brief
+    report_type: Literal["comprehensive", "summary", "legal_brief"] = "comprehensive"
     include_remedies: bool = True
     include_timeline: bool = True
     include_similar_cases: bool = True
-    format: str = "pdf"  # pdf, docx, html
-    style: str = "formal"  # formal, casual
+    format: Literal["pdf", "docx", "html"] = "pdf"
+    style: Literal["formal", "casual"] = "formal"
     privacy_profile: str = "personal_identifiers"
 
 
@@ -463,3 +463,35 @@ class PaginatedResponse(BaseModel):
     limit: int
     offset: int
     items: List[Dict[str, Any]]
+
+
+# ============================================================================
+# Notification Preference Models
+# ============================================================================
+
+class UserPreferenceUpdate(BaseModel):
+    """Update user notification preferences"""
+    email: EmailStr
+    phone_number: Optional[str] = None
+    notification_channel: str = "both"  # "sms", "email", "both"
+    timezone: str = "UTC"
+    reminder_thresholds: List[int] = Field(default_factory=lambda: [30, 10, 3, 1])
+    holiday_aware_reminders: bool = False
+    holiday_country: Optional[str] = None
+    holiday_region: Optional[str] = None
+    holiday_calendar_json: Optional[str] = None
+
+
+class UserPreferenceResponse(BaseModel):
+    """User notification preferences response"""
+    user_id: int
+    email: str
+    phone_number: Optional[str] = None
+    notification_channel: str
+    timezone: str
+    reminder_thresholds: List[int]
+    holiday_aware_reminders: bool
+    holiday_country: Optional[str] = None
+    holiday_region: Optional[str] = None
+    holiday_calendar_json: Optional[str] = None
+    updated_at: datetime

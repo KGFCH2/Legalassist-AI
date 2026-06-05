@@ -1,11 +1,12 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
-from .scheduler import SchedulerRun
-from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, AnonymizedShareToken, CaseStatus, DocumentType
+from .scheduler import SchedulerRun, SchedulerJobStatus
+from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, AnonymizedShareToken, CaseStatus, DocumentType, CaseComment, CasePresence
 from .auth import User, OTPVerification, APIKey, APIKey
 from .audit import AuditEvent
 from db.immutable_audit_log import ImmutableAuditLog
 from .feedback import UserFeedback
 from .reports import Report, ReportStatus, ReportType, ReportFormat
+from db.models.locks import DocumentProcessingLock, LockAction
 from .analytics import (
     CaseRecord,
     CaseOutcome,
@@ -21,7 +22,10 @@ from .analytics import (
     KnowledgeGraphEdge,
     PrecedentMatch,
 )
+from .exports import ExportJob, ExportChunk
+from .secrets import SecretEntry, SecretRotationLog
 from .knowledge import KnowledgeInvalidation, KnowledgeInvalidationStatus
+from .idempotency import IdempotencyKey, IdempotencyKeyStatus
 
 __all__ = [
     "NotificationStatus",
@@ -39,6 +43,8 @@ __all__ = [
     "AnonymizedShareToken",
     "CaseStatus",
     "DocumentType",
+    "CaseComment",
+    "CasePresence",
     "User",
     "OTPVerification",
     "APIKey",
@@ -62,8 +68,15 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
+    "ExportJob",
+    "ExportChunk",
+    "SecretEntry",
+    "SecretRotationLog",
     "KnowledgeInvalidation",
     "KnowledgeInvalidationStatus",
     "SchedulerRun",
+    "SchedulerJobStatus",
+    "IdempotencyKey",
+    "IdempotencyKeyStatus",
 ]
 

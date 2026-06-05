@@ -28,6 +28,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote, unquote
 
 import structlog
 from authlib.integrations.starlette_client import OAuth
@@ -97,7 +98,8 @@ def _generate_state(provider: str, redirect_uri: str) -> str:
     token so no shared storage is needed across workers.
     """
     exp = int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp())
-    payload = f"{exp}:{provider}:{redirect_uri}"
+    quoted_uri = quote(redirect_uri, safe="")
+    payload = f"{exp}:{provider}:{quoted_uri}"
     sig = hmac.new(_get_state_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
     return f"{payload}:{sig}"
 
@@ -111,14 +113,15 @@ def _consume_state(state: str) -> Optional[dict]:
         parts = state.rsplit(":", 3)
         if len(parts) != 4:
             return None
-        exp_str, provider, redirect_uri, sig = parts
+        exp_str, provider, quoted_uri, sig = parts
         exp = int(exp_str)
         if datetime.now(timezone.utc).timestamp() > exp:
             return None
-        payload = f"{exp_str}:{provider}:{redirect_uri}"
+        payload = f"{exp_str}:{provider}:{quoted_uri}"
         expected_sig = hmac.new(_get_state_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
         if not hmac.compare_digest(expected_sig, sig):
             return None
+        redirect_uri = unquote(quoted_uri)
         return {"provider": provider, "redirect_uri": redirect_uri, "exp": datetime.fromtimestamp(exp, tz=timezone.utc)}
     except (ValueError, IndexError):
         return None
@@ -143,6 +146,11 @@ def _get_or_create_user(email: str, name: str, provider: str, provider_id: str) 
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="This email is already linked to a different SSO provider. Contact support to merge accounts.",
+                )
+            if existing.sso_provider is None and existing.password_hash is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This email already has a password-based account. Log in with your password and link your SSO provider from your account settings.",
                 )
             existing.sso_provider = provider
             existing.sso_provider_id = provider_id
@@ -173,7 +181,24 @@ def _get_or_create_user(email: str, name: str, provider: str, provider_id: str) 
         db.close()
 
 
-def _build_token_response(user: User, provider: str) -> RedirectResponse:
+def _validate_redirect_uri(uri: str) -> bool:
+    """Check that the redirect URI origin matches an allowed host."""
+    from urllib.parse import urlparse
+    from api.config import get_settings
+    _sso_settings = get_settings()
+    parsed = urlparse(uri)
+    if not parsed.netloc:
+        return True  # relative path is always safe
+    allowed = list(_sso_settings.CORS_ORIGINS) + [
+        f"https://{h}" for h in _sso_settings.ALLOWED_HOSTS
+    ] + [
+        f"http://{h}" for h in _sso_settings.ALLOWED_HOSTS
+    ]
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return origin in allowed
+
+
+def _build_token_response(user: User, provider: str, redirect_uri: str = "") -> RedirectResponse:
     from api.config import get_settings
     _sso_settings = get_settings()
     role = user.role.value if user.role else "client"
@@ -181,7 +206,8 @@ def _build_token_response(user: User, provider: str) -> RedirectResponse:
         data={"sub": str(user.id), "email": user.email, "role": role, "provider": provider}
     )
     token_max_age = _sso_settings.JWT_ACCESS_TOKEN_MINUTES * 60
-    response = RedirectResponse(url="/", status_code=302)
+    redirect_to = redirect_uri if (redirect_uri and _validate_redirect_uri(redirect_uri)) else "/"
+    response = RedirectResponse(url=redirect_to, status_code=302)
     response.set_cookie(
         key="access_token",
         value=token,
@@ -270,7 +296,7 @@ async def sso_google_callback(request: Request, code: str = Query(...), state: s
     provider_id = userinfo.get("sub", "")
 
     user = _get_or_create_user(email, name, "google", provider_id)
-    return _build_token_response(user, "google")
+    return _build_token_response(user, "google", ctx["redirect_uri"])
 
 
 @router.get("/microsoft")
@@ -312,7 +338,7 @@ async def sso_microsoft_callback(request: Request, code: str = Query(...), state
     provider_id = userinfo.get("sub", "")
 
     user = _get_or_create_user(email, name, "microsoft", provider_id)
-    return _build_token_response(user, "microsoft")
+    return _build_token_response(user, "microsoft", ctx["redirect_uri"])
 
 
 @router.get("/config")

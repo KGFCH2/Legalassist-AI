@@ -198,14 +198,14 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Atomically mark OTP as used. Returns True only if OTP was not already used."""
     try:
-        otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-        if otp:
-            otp.is_used = True
-            db.commit()
-            db.refresh(otp)
-            return True
-        return False
+        result = db.query(OTPVerification).filter(
+            OTPVerification.id == otp_id,
+            OTPVerification.is_used == False,
+        ).update({"is_used": True}, synchronize_session=False)
+        db.commit()
+        return result > 0
     except Exception:
         db.rollback()
         return False
@@ -377,10 +377,23 @@ def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
     return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
 
 
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
 def get_cases_by_criteria(db: Session, **criteria) -> List[CaseRecord]:
-    """Search case records by criteria"""
+    """Search case records by approved criteria fields only."""
     query = db.query(CaseRecord)
     for key, value in criteria.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
         if hasattr(CaseRecord, key) and value:
             query = query.filter(getattr(CaseRecord, key) == value)
     return query.all()

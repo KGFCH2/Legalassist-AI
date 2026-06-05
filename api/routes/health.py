@@ -3,6 +3,7 @@ Health Check Endpoints
 GET /api/v1/health - API health status
 GET /api/v1/health/ready - Readiness probe
 """
+from datetime import datetime, timezone
 from fastapi import APIRouter
 import structlog
 
@@ -19,7 +20,7 @@ async def health_check() -> dict:
     return {
         "status": "healthy",
         "version": "1.0.0",
-        "timestamp": __import__('datetime').datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 

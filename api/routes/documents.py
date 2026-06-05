@@ -3,6 +3,7 @@ Document Analysis Endpoints
 POST /api/v1/analyze/document - Analyze document asynchronously
 GET /api/v1/analyze/{job_id} - Check analysis job status
 """
+from datetime import datetime, timezone
 import uuid
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
@@ -69,7 +70,7 @@ async def analyze_document(
     return AnalysisJobResponse(
         job_id=task.id,
         status="pending",
-        created_at=__import__('datetime').datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
 
 
@@ -89,7 +90,7 @@ async def get_analysis_status(
     return AnalysisJobResponse(
         job_id=job_id,
         status=status_info["status"],
-        created_at=__import__('datetime').datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         result_url=f"/api/v1/analyze/{job_id}/result" if status_info["status"] == "completed" else None
     )
 

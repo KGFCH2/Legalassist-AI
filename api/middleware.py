@@ -2,6 +2,7 @@
 API Rate Limiting and Middleware
 """
 import time
+import threading
 from typing import Callable
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -22,7 +23,16 @@ logger = structlog.get_logger(__name__)
 
 
 class RateLimiter:
-    """Token bucket rate limiter using Redis"""
+    """Token bucket rate limiter using Redis with application-level locking.
+
+    Thread safety:
+    - Redis-side:  the INCR + EXPIRE Lua script runs atomically in Redis.
+    - App-side:    a module-level ``_lock`` serialises local state access so
+                   that concurrent ASGI workers see consistent bucket values.
+    """
+
+    _instance = None
+    _lock = threading.Lock()
 
     # Lua script: atomically increment the counter and set TTL on first write.
     # Redis executes Lua scripts as a single atomic operation, so there is no
@@ -35,20 +45,29 @@ end
 return current
 """
 
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
-        self.redis = redis.from_url(redis_url, decode_responses=True)
-        self.requests = 100  # requests
-        self.window = 60  # seconds
-        self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
+        if not hasattr(self, "_initialised"):
+            self.redis = redis.from_url(redis_url, decode_responses=True)
+            self.requests = 100  # requests
+            self.window = 60  # seconds
+            self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
+            self._initialised = True
 
     def is_allowed(self, key: str) -> bool:
-        """Check if request is allowed"""
+        """Check if request is allowed under the rate limit."""
         try:
-            current = int(self._script(keys=[key], args=[self.window]))
+            with self._lock:
+                current = int(self._script(keys=[key], args=[self.window]))
             return current <= self.requests
         except Exception as e:
             logger.error("Rate limiter error", error=str(e))
-            # Fail open - allow request if Redis unavailable
             return True
     
     def get_retry_after(self, key: str) -> int:
@@ -58,6 +77,9 @@ return current
             return ttl if ttl > 0 else self.window
         except:
             return self.window
+
+
+_rate_limiter = RateLimiter()
 
 
 async def rate_limit_middleware(request: Request, call_next: Callable):
@@ -71,7 +93,7 @@ async def rate_limit_middleware(request: Request, call_next: Callable):
     client_ip = request.client.host if request.client else "unknown"
     user_id = request.headers.get("X-User-Id", client_ip)
     
-    rate_limiter = RateLimiter()
+    rate_limiter = _rate_limiter
     rate_limit_key = f"ratelimit:{user_id}:{int(time.time() // 60)}"
     
     if not rate_limiter.is_allowed(rate_limit_key):

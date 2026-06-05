@@ -4,7 +4,7 @@ GET /api/v1/deadlines/upcoming - Get user's upcoming deadlines
 GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
 """
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Query
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
@@ -20,7 +20,7 @@ logger = structlog.get_logger(__name__)
     summary="Get user's upcoming deadlines"
 )
 async def get_upcoming_deadlines(
-    days: int = 30,
+    days: int = Query(30, ge=1, le=365, description="Look-ahead window in days (max 365)"),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> UpcomingDeadlinesResponse:
     """

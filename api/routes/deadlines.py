@@ -8,10 +8,17 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
+
+
+def _derive_deadline_status(due_date: datetime) -> str:
+    """Return 'overdue' if past due, 'pending' otherwise."""
+    if due_date < datetime.now(timezone.utc):
+        return "overdue"
+    return "pending"
 
 
 @router.get(
@@ -37,8 +44,7 @@ async def get_upcoming_deadlines(
         days=days
     )
     
-    # Mock deadline data
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     deadlines = [
         DeadlineResponse(
             deadline_id="dl_001",
@@ -49,7 +55,7 @@ async def get_upcoming_deadlines(
             due_date=now + timedelta(days=3),
             days_until_due=3,
             priority="critical",
-            status="pending",
+            status=_derive_deadline_status(now + timedelta(days=3)),
             reminder_enabled=True,
             reminder_days=7,
             created_at=now
@@ -63,7 +69,7 @@ async def get_upcoming_deadlines(
             due_date=now + timedelta(days=10),
             days_until_due=10,
             priority="high",
-            status="pending",
+            status=_derive_deadline_status(now + timedelta(days=10)),
             reminder_enabled=True,
             reminder_days=7,
             created_at=now
@@ -77,7 +83,7 @@ async def get_upcoming_deadlines(
             due_date=now + timedelta(days=21),
             days_until_due=21,
             priority="medium",
-            status="pending",
+            status=_derive_deadline_status(now + timedelta(days=21)),
             reminder_enabled=True,
             reminder_days=7,
             created_at=now
@@ -97,7 +103,7 @@ async def get_upcoming_deadlines(
         medium_count=medium,
         low_count=low,
         deadlines=deadlines,
-        generated_at=datetime.utcnow()
+        generated_at=datetime.now(timezone.utc)
     )
 
 
@@ -118,17 +124,18 @@ async def get_deadline_details(
         user_id=current_user.user_id
     )
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+    due = now + timedelta(days=5)
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,
         case_id="case_001",
         title="Example Deadline",
         description="Example deadline description",
-        due_date=now + timedelta(days=5),
+        due_date=due,
         days_until_due=5,
         priority="high",
-        status="pending",
+        status=_derive_deadline_status(due),
         reminder_enabled=True,
         reminder_days=7,
         created_at=now
@@ -157,7 +164,7 @@ async def create_deadline(
         title=title
     )
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     days_until = (due_date - now).days
     
     return DeadlineResponse(
@@ -169,7 +176,7 @@ async def create_deadline(
         due_date=due_date,
         days_until_due=days_until,
         priority=priority,
-        status="pending",
+        status=_derive_deadline_status(due_date),
         reminder_enabled=True,
         reminder_days=reminder_days,
         created_at=now
@@ -196,18 +203,18 @@ async def update_deadline(
         user_id=current_user.user_id
     )
     
-    # In production, fetch and update from database
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+    due = due_date or (now + timedelta(days=7))
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,
         case_id="case_001",
         title=title or "Updated Deadline",
         description="Updated description",
-        due_date=due_date or (now + timedelta(days=7)),
+        due_date=due,
         days_until_due=7,
         priority=priority or "medium",
-        status="pending",
+        status=_derive_deadline_status(due),
         reminder_enabled=True,
         reminder_days=7,
         created_at=now

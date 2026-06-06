@@ -3,6 +3,7 @@ Deadline Endpoints
 GET /api/v1/deadlines/upcoming - Get user's upcoming deadlines
 GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
+PUT /api/v1/deadlines/{deadline_id} - Update deadline
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
@@ -219,8 +220,9 @@ async def update_deadline(
     due_date: datetime = None,
     deadline_type: str = None,
     priority: str = None,
+    description: str = None,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db_rls)
+    db: Session = Depends(get_db),
 ) -> DeadlineResponse:
     logger.info(
         "Updating deadline",

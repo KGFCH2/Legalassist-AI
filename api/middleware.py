@@ -7,7 +7,8 @@ API Rate Limiting and Middleware
 """
 import hashlib
 import time
-from typing import Callable, Optional
+import threading
+from typing import Callable
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 import redis
@@ -49,22 +50,24 @@ settings = get_settings()
 
 
 class RateLimiter:
-    """Sliding-window rate limiter with per-endpoint and global enforcement."""
+    """Token bucket rate limiter using Redis with application-level locking.
 
-    _SLIDING_WINDOW_SCRIPT = """
-local key = KEYS[1]
-local now = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local limit = tonumber(ARGV[3])
-local cutoff = now - (window * 1000)
+    Thread safety:
+    - Redis-side:  the INCR + EXPIRE Lua script runs atomically in Redis.
+    - App-side:    a module-level ``_lock`` serialises local state access so
+                   that concurrent ASGI workers see consistent bucket values.
+    """
 
-redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
-local count = redis.call('ZCARD', key)
+    _instance = None
+    _lock = threading.Lock()
 
-if count >= limit then
-    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-    local retry_after = math.ceil((tonumber(oldest[2]) + window * 1000 - now) / 1000)
-    return {0, retry_after}
+    # Lua script: atomically increment the counter and set TTL on first write.
+    # Redis executes Lua scripts as a single atomic operation, so there is no
+    # window between INCR and EXPIRE where the key can be left without a TTL.
+    _INCR_EXPIRE_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
 end
 
 redis.call('ZADD', key, now, now .. ':' .. ARGV[4])
@@ -72,37 +75,31 @@ redis.call('PEXPIRE', key, window * 1000 + 1000)
 return {1, 0}
 """
 
-    def __init__(self):
-        self._redis: Optional[redis.Redis] = None
-        self._script = None
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
 
-    def _get_client(self) -> redis.Redis:
-        if self._redis is None:
-            self._redis = redis.from_url(settings.REDIS_URL or "redis://localhost:6379/0", decode_responses=True)
-            self._script = self._redis.register_script(self._SLIDING_WINDOW_SCRIPT)
-        return self._redis
+    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+        if not hasattr(self, "_initialised"):
+            self.redis = redis.from_url(redis_url, decode_responses=True)
+            self.requests = 100  # requests
+            self.window = 60  # seconds
+            self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
+            self._initialised = True
 
-    def _endpoint_key(self, user_id: str, path: str) -> str:
-        ep_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
-        return f"ratelimit:ep:{ep_hash}:{user_id}"
-
-    def _global_key(self, user_id: str) -> str:
-        return f"ratelimit:global:{user_id}"
-
-    def check(self, key: str, limit: int, window: int) -> tuple[bool, int]:
-        """Returns (allowed, retry_after_seconds)."""
+    def is_allowed(self, key: str) -> bool:
+        """Check if request is allowed under the rate limit."""
         try:
-            client = self._get_client()
-            now_ms = int(time.time() * 1000)
-            unique = str(time.monotonic_ns())
-            result = self._script(keys=[key], args=[now_ms, window, limit, unique])
-            allowed = bool(int(result[0]))
-            retry_after = int(result[1])
-            return allowed, retry_after
+            with self._lock:
+                current = int(self._script(keys=[key], args=[self.window]))
+            return current <= self.requests
         except Exception as e:
             logger.error("Rate limiter error", error=str(e))
-            return True, 0
-
+            return True
+    
     def get_retry_after(self, key: str) -> int:
         try:
             client = self._get_client()

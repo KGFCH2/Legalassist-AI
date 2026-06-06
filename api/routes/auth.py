@@ -12,6 +12,11 @@ from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.rate_limits import check_api_key_creation_limit
 from database import get_db, APIKey
 import structlog
+from core.log_redaction import mask_email
+from fastapi import Request
+from api.auth import revoke_jwt_token as api_revoke_jwt
+
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 logger = structlog.get_logger(__name__)
@@ -20,15 +25,16 @@ logger = structlog.get_logger(__name__)
 @router.post(
     "/token",
     response_model=TokenResponse,
-    summary="Get access token"
+    summary="Get access token",
+    dependencies=[Depends(RateLimit(use_auth_defaults=True))]
 )
 async def get_token(
-    username: str,
-    password: str
+    request: TokenRequest
 ) -> TokenResponse:
     """
     Authenticate user and get access token
     
+    Request body:
     - **username**: User email or username
     - **password**: User password
     
@@ -36,9 +42,9 @@ async def get_token(
     """
     
     # In production, validate against database
-    logger.info("Token request", username=username)
+    logger.info("Token request", username=request.username)
     
-    token = create_access_token({"sub": "user123", "email": username, "role": "user"})
+    token = create_access_token({"sub": "user123", "email": request.username, "role": "user"})
     
     return TokenResponse(
         access_token=token,
@@ -73,12 +79,12 @@ async def create_api_key(
         key_name=request.name
     )
     
-    key = generate_api_key()
-    key_hash = hash_api_key(key)
-    expires_at = None
-    
-    if request.expires_in_days:
-        expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
+    key, api_key_record = create_api_key_record(
+        db=db,
+        name=request.name,
+        expires_in_days=request.expires_in_days,
+        user_id=current_user.user_id
+    )
     
     record = APIKey(
         user_id=int(current_user.user_id),
@@ -181,3 +187,33 @@ async def get_current_user_info(
         "role": current_user.role,
         "subscription_tier": "pro"
     }
+
+
+
+
+@router.post(
+    "/logout",
+    summary="Logout and revoke current JWT token",
+    dependencies=[Depends(RateLimit(use_auth_defaults=True))]
+)
+async def logout(request: Request) -> dict:
+    """Revoke the JWT presented in Authorization header (if any)."""
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    token = None
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(None, 1)[1].strip()
+
+    if not token:
+        # Nothing to revoke, but return success to avoid token probing
+        return {"status": "ok", "revoked": False}
+
+    try:
+        success = api_revoke_jwt(token)
+        if success:
+            logger.info("api_logout_revoked")
+        else:
+            logger.info("api_logout_no_revoke_needed")
+        return {"status": "ok", "revoked": bool(success)}
+    except Exception as e:
+        logger.error("api_logout_failed", error=str(e))
+        return {"status": "error", "revoked": False}

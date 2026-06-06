@@ -1,4 +1,6 @@
+import logging
 import os
+import re
 import uuid
 import logging
 from pathlib import Path
@@ -36,9 +38,11 @@ def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int
     Save attachment bytes to the attachments directory.
     Returns (stored_path, size_bytes).
     """
-    # Randomize filename to avoid collisions and sensitive names
     ext = Path(original_filename).suffix or ""
-    if Config.ATTACHMENTS_RANDOMIZE_FILENAMES:
+    if not _is_safe_attachment_path(str(ATTACHMENTS_DIR / original_filename)):
+        logger.warning("Traversal detected in original_filename, randomizing", filename=original_filename)
+        stored_name = f"{uuid.uuid4().hex}{ext}"
+    elif Config.ATTACHMENTS_RANDOMIZE_FILENAMES:
         stored_name = f"{uuid.uuid4().hex}{ext}"
     else:
         safe_name = Path(original_filename).name.replace("..", "")
@@ -52,8 +56,8 @@ def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int
     with open(stored_path, "wb") as f:
         f.write(file_bytes)
 
-    size = stored_path.stat().st_size
-    return str(stored_path), size
+    size = resolved.stat().st_size
+    return str(resolved), size
 
 
 def get_attachment_path(stored_path: str) -> str:

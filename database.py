@@ -501,6 +501,12 @@ class User(Base):
         nullable=False
     )
 
+    subscription_tier = Column(
+        String(50),
+        default="free",
+        nullable=False
+    )
+
     # -------------------------------------------------------------------------
     # ORM Relationships
     # -------------------------------------------------------------------------

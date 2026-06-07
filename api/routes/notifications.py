@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from urllib.parse import parse_qsl
 from typing import Any
 
@@ -118,7 +119,6 @@ def _verify_sendgrid_signature(request: Request, payload: str) -> bool:
     if not signature or not timestamp:
         raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="SENDGRID_SIGNATURE_MISSING", message="Missing SendGrid signature headers")
 
-    import time
     try:
         ts = int(timestamp)
     except ValueError:

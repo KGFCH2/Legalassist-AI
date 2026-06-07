@@ -65,6 +65,11 @@ OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max 
 OTP_LOCKOUT_MINUTES = int(os.getenv("OTP_LOCKOUT_MINUTES", "15"))  # Lockout duration after max attempts
 
 
+def _normalize_email(email: str) -> str:
+    """Normalize email to canonical form: lowercased, preserving delimiters."""
+    return email.strip().lower()
+
+
 def _hash_otp(otp: str) -> str:
     """Hash OTP code before storing"""
     return hashlib.sha256(otp.encode()).hexdigest()
@@ -218,6 +223,9 @@ def request_otp(email: str) -> Tuple[bool, str]:
     Request OTP for email authentication.
     Returns (success, message).
     """
+    # Normalize email to canonical form before any rate limit / storage operation
+    email = _normalize_email(email)
+
     # Validate email format
     if not email or not EMAIL_REGEX.match(email):
         return False, "Invalid email address"
@@ -286,6 +294,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
     - Lock OTP after max failed attempts
     - Require user to request a new OTP after lockout
     """
+    email = _normalize_email(email)
     db = SessionLocal()
     try:
         # Get pending OTP

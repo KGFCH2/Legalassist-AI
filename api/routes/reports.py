@@ -206,28 +206,29 @@ async def download_report(
         )
     
     if status_info["status"] != "completed":
-        return JSONResponse(
+        current = status_info["status"]
+        raise HTTPException(
             status_code=status.HTTP_202_ACCEPTED,
-            content={
-                "report_id": report_id,
-                "status": status_info["status"],
-                "detail": f"Report is still {status_info['status']}",
-            },
+            detail=f"Report {report_id} has status '{current}'; check back after generation completes"
         )
     
     base_dir = _get_reports_base_dir()
     user_dir = base_dir / str(current_user.user_id)
 
-    if report["status"] != "completed":
-        raise HTTPException(
-            status_code=status.HTTP_202_ACCEPTED,
-            detail=f"Report is still {report['status']}",
-        )
-
-    if not report["file_path"]:
+    if not user_dir.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report file not found on disk"
+            detail=f"Report {report_id} output directory not found; the report may not have been generated yet",
+        )
+
+    matches = list(user_dir.glob(f"*_{report_id}.pdf"))
+    if not matches:
+        matches = list(user_dir.glob(f"*{report_id}.pdf"))
+
+    if not matches:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Report {report_id} file not found on disk at {user_dir}",
         )
     
     logger.info(

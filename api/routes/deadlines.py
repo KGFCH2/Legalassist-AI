@@ -165,48 +165,31 @@ async def create_deadline(
         user_id=current_user.user_id,
         title=request.title
     )
-
-    db = None
-    try:
-        db = get_db()
-        now = datetime.now(timezone.utc)
-        deadline = CaseDeadline(
-            user_id=int(current_user.user_id),
-            case_id=int(case_id) if case_id else None,
-            case_title=title,
-            deadline_date=due_date,
-            deadline_type="custom",
-            description=description,
-            created_at=now,
-            updated_at=now,
-            is_completed=False,
+    
+    now = datetime.now(timezone.utc)
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+    if due_date < now:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Deadline date must be in the future"
         )
-        db.add(deadline)
-        db.commit()
-        db.refresh(deadline)
-
-        days_until = (deadline.deadline_date - datetime.now(timezone.utc)).days
-        return DeadlineResponse(
-            deadline_id=str(deadline.id),
-            user_id=str(deadline.user_id),
-            case_id=str(deadline.case_id) if deadline.case_id else None,
-            title=deadline.case_title,
-            description=deadline.description or f"{deadline.deadline_type} deadline",
-            due_date=deadline.deadline_date,
-            days_until_due=days_until,
-            priority=priority,
-            status="pending",
-            reminder_enabled=True,
-            reminder_days=reminder_days,
-            created_at=deadline.created_at,
-        )
-    except Exception:
-        if db:
-            db.rollback()
-        raise
-    finally:
-        if db:
-            db.close()
+    days_until = (due_date - now).days
+    
+    return DeadlineResponse(
+        deadline_id=str(deadline_id),
+        user_id=str(current_user.user_id),
+        case_id=str(case["id"]),
+        title=title,
+        description=description,
+        due_date=normalized_due_date,
+        days_until_due=days_until,
+        priority=_deadline_priority(days_until),
+        status="active",
+        reminder_enabled=True,
+        reminder_days=request.reminder_days,
+        created_at=now
+    )
 
 
 @router.put(
@@ -229,14 +212,65 @@ async def update_deadline(
         deadline_id=deadline_id,
         user_id=current_user.user_id
     )
+    
+    # In production, fetch and update from database
+    now = datetime.now(timezone.utc)
+    if due_date is not None:
+        if due_date.tzinfo is None:
+            due_date = due_date.replace(tzinfo=timezone.utc)
+        if due_date < now:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Deadline date must be in the future"
+            )
+    return DeadlineResponse(
+        deadline_id=str(updated_deadline.id),
+        user_id=str(updated_deadline.user_id),
+        case_id=str(updated_deadline.case_id),
+        title=updated_deadline.case_title,
+        description=updated_deadline.description or "",
+        due_date=due_date or now,
+        days_until_due=days_until,
+        priority=_deadline_priority(days_until),
+        status=updated_deadline.status,
+        reminder_enabled=True,
+        reminder_days=7,
+        created_at=updated_deadline.created_at
+    )
 
     db = None
     try:
-        db = get_db()
-        deadline = db.query(CaseDeadline).filter(
-            CaseDeadline.id == int(deadline_id),
-            CaseDeadline.user_id == int(current_user.user_id),
-        ).first()
+        updated_deadline = transition_deadline(
+            db=db,
+            deadline_id=int(deadline_id),
+            target_status="active",
+            actor_user_id=current_user.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+        
+    now = datetime.now(timezone.utc)
+    due_date = _normalize_utc_datetime(updated_deadline.deadline_date)
+    days_until = _days_until_due(due_date, now)
+    
+    return DeadlineResponse(
+        deadline_id=str(updated_deadline.id),
+        user_id=str(updated_deadline.user_id),
+        case_id=str(updated_deadline.case_id),
+        title=updated_deadline.case_title,
+        description=updated_deadline.description or "",
+        due_date=due_date or now,
+        days_until_due=days_until,
+        priority=_deadline_priority(days_until),
+        status=updated_deadline.status,
+        reminder_enabled=True,
+        reminder_days=7,
+        created_at=updated_deadline.created_at
+    )
+
 
         if not deadline:
             raise HTTPException(

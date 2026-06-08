@@ -87,7 +87,7 @@ def generate_report(
 
     pdf_bytes = generate_case_pdf(user_id=int(user_id), case_id=int(case_id))
     if not pdf_bytes:
-        raise RuntimeError("PDF generation returned empty content")
+        raise RuntimeError(f"PDF generation returned empty content for case_id={case_id}, user_id={user_id}")
 
     file_path.write_bytes(pdf_bytes)
 

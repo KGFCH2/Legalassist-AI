@@ -16,7 +16,7 @@ Key refactoring:
 - No more report_id = job_id confusion
 """
 import uuid
-from fastapi import APIRouter, HTTPException, status, Depends, Request
+from fastapi import APIRouter, HTTPException, status, Depends, Request, Query
 from fastapi.responses import FileResponse
 from pathlib import Path
 from report_service import _get_reports_base_dir
@@ -328,8 +328,8 @@ async def download_report(
     summary="List user's reports"
 )
 async def list_reports(
-    limit: int = 10,
-    offset: int = 0,
+    limit: int = Query(default=10, ge=1, le=100, description="Maximum number of reports to return (1–100)"),
+    offset: int = Query(default=0, ge=0, description="Number of reports to skip"),
     status_filter: str | None = None,
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user)

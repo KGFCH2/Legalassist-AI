@@ -3,8 +3,9 @@ Deadline Endpoints
 GET /api/v1/deadlines/upcoming - Get user's upcoming deadlines
 GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
+PUT /api/v1/deadlines/{deadline_id} - Update deadline
 """
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Query
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
@@ -30,21 +31,15 @@ def _deadline_priority(days_until_due: int) -> str:
     summary="Get user's upcoming deadlines"
 )
 async def get_upcoming_deadlines(
-    days: int = 30,
+    days: int = Query(30, ge=1, le=365, description="Look-ahead window in days (max 365)"),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> UpcomingDeadlinesResponse:
-    """
-    Get upcoming deadlines for user
-    
-    - **days**: Look ahead N days (default 30)
-    
-    Returns sorted list of upcoming deadlines by urgency
-    """
-    
     logger.info(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
-        days=days
+        days=days,
+        limit=limit,
+        offset=offset,
     )
     
     # Mock deadline data — priority is computed from days_until_due
@@ -96,10 +91,9 @@ async def get_upcoming_deadlines(
 )
 async def get_deadline_details(
     deadline_id: str,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
-    """Get complete deadline details"""
-    
     logger.info(
         "Fetching deadline",
         deadline_id=deadline_id,
@@ -130,19 +124,19 @@ async def get_deadline_details(
     summary="Create new deadline"
 )
 async def create_deadline(
+    case_id: int,
     title: str,
     due_date: datetime,
     description: str = "",
     case_id: str = None,
     reminder_days: int = 7,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> DeadlineResponse:
-    """Create a new deadline"""
-    
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
-        title=title
+        title=request.title
     )
     
     now = datetime.now(timezone.utc)
@@ -150,9 +144,9 @@ async def create_deadline(
     days_until = max(0, (due_date_utc.date() - now.date()).days)
     
     return DeadlineResponse(
-        deadline_id="dl_new",
-        user_id=current_user.user_id,
-        case_id=case_id,
+        deadline_id=str(deadline_id),
+        user_id=str(current_user.user_id),
+        case_id=str(case["id"]),
         title=title,
         description=description,
         due_date=due_date_utc,
@@ -160,7 +154,7 @@ async def create_deadline(
         priority=_deadline_priority(days_until),
         status="pending",
         reminder_enabled=True,
-        reminder_days=reminder_days,
+        reminder_days=request.reminder_days,
         created_at=now
     )
 
@@ -171,13 +165,11 @@ async def create_deadline(
     summary="Update deadline"
 )
 async def update_deadline(
-    deadline_id: str,
+    deadline_id: int,
     title: str = None,
     due_date: datetime = None,
     current_user: CurrentUser = Depends(get_current_user)
 ) -> DeadlineResponse:
-    """Update a deadline"""
-    
     logger.info(
         "Updating deadline",
         deadline_id=deadline_id,
@@ -205,5 +197,62 @@ async def update_deadline(
         status="pending",
         reminder_enabled=True,
         reminder_days=7,
-        created_at=now
+        created_at=updated_deadline.created_at
     )
+
+    db = None
+    try:
+        updated_deadline = transition_deadline(
+            db=db,
+            deadline_id=int(deadline_id),
+            target_status="active",
+            actor_user_id=current_user.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+        
+    now = datetime.now(timezone.utc)
+    due_date = _normalize_utc_datetime(updated_deadline.deadline_date)
+    days_until = _days_until_due(due_date, now)
+    
+    return DeadlineResponse(
+        deadline_id=str(updated_deadline.id),
+        user_id=str(updated_deadline.user_id),
+        case_id=str(updated_deadline.case_id),
+        title=updated_deadline.case_title,
+        description=updated_deadline.description or "",
+        due_date=due_date or now,
+        days_until_due=days_until,
+        priority=_deadline_priority(days_until),
+        status=updated_deadline.status,
+        reminder_enabled=True,
+        reminder_days=7,
+        created_at=updated_deadline.created_at
+    )
+
+
+        if not deadline:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Deadline not found"
+            )
+
+        if title is not None:
+            deadline.case_title = title
+        if due_date is not None:
+            deadline.deadline_date = due_date
+        deadline.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(deadline)
+
+        return _deadline_to_response(deadline)
+    except Exception:
+        if db:
+            db.rollback()
+        raise
+    finally:
+        if db:
+            db.close()

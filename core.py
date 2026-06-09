@@ -103,7 +103,9 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
             continue
         try:
             conf = float(confs[i])
-        except Exception:
+        except Exception as e:
+        import logging
+        logging.error(f"Core error: {e}")
             conf = -1.0
         if conf < 0:
             continue
@@ -707,7 +709,7 @@ def parse_timeline(raw_text: str) -> List[Dict[str, str]]:
                     try: return datetime.strptime(date_str, fmt)
                     except: continue
                 return datetime(9999, 12, 31)
-            except:
+    except Exception:
                 return datetime(9999, 12, 31)
 
         return sorted(events, key=lambda x: parse_date(x.get('date')))

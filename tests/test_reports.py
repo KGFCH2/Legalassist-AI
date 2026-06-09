@@ -108,7 +108,6 @@ def test_generate_report_flow_reuses_single_report_id(monkeypatch):
         mock_report.job_id = kwargs["celery_task_id"]
         mock_report.report_type = kwargs["report_type"]
         mock_report.format = kwargs["format"]
-        mock_report.style = kwargs["style"]
         mock_report.status = "pending"
         mock_report.created_at = datetime.now(timezone.utc)
         return mock_report

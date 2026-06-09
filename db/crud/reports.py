@@ -46,7 +46,6 @@ def create_report(
         job_id=celery_task_id,
         report_type=ReportType(report_type),
         format=ReportFormat(format),
-        style=style,
         status=ReportStatus.PENDING,
     )
     db.add(report)
@@ -129,18 +128,8 @@ def update_report_status(
         return None
     
     report.status = ReportStatus(status)
-    if file_path is not None:
-        report.file_path = file_path
-    if file_size_bytes is not None:
-        report.file_size_bytes = file_size_bytes
-    if error_message is not None:
-        report.error_message = error_message
-    if started_at is not None:
-        report.started_at = started_at
     if completed_at is not None:
         report.completed_at = completed_at
-    
-    report.updated_at = dt.datetime.now(dt.timezone.utc)
     db.commit()
     db.refresh(report)
     return report

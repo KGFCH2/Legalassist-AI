@@ -181,7 +181,17 @@ def validate_file_upload(
         raise ValidationError(
             detail=f"File type '{file.content_type}' not allowed. Allowed: {', '.join(allowed_mime_types)}"
         )
+    # Reject files that declare no MIME type — client-provided content_type
+    # cannot be trusted as the sole gate; absent type is also unacceptable.
+    if not file.content_type:
+        logger.warning("missing_upload_mime_type", filename=file.filename)
+        raise ValidationError(
+            detail="File MIME type is missing. Ensure the file is a supported type."
+        )
 
+    # Content-based validation: inspect magic bytes independently of the
+    # client-supplied content_type.  A malicious actor can set any MIME type
+    # they like; only the actual file header is authoritative.
     if check_magic_bytes and file_ext in MAGIC_BYTES:
         try:
             if hasattr(file.file, 'read'):
@@ -199,7 +209,10 @@ def validate_file_upload(
         except ValidationError:
             raise
         except Exception as exc:
+            # Log and re-raise so the caller is never silently passed a file
+            # whose content could not be verified — fail closed.
             logger.error("magic_bytes_check_failed", filename=file.filename, error=str(exc))
+            raise ValidationError(detail="File content could not be verified. Upload rejected.") from exc
 
     if file.size and file.size > max_size:
         logger.warning("upload_exceeds_max_size", filename=file.filename, size_bytes=file.size, max_size_bytes=max_size)
@@ -381,3 +394,65 @@ def validate_query_string(query_string: str, max_length: int = 2048) -> None:
     if len(query_string) > max_length:
         logger.warning("query_string_exceeds_limit", length=len(query_string), max_length=max_length)
         raise ValidationError(detail=f"Query string too long ({len(query_string)} chars, max {max_length})")
+
+
+def validate_upload_file_path(file_path: str, allowed_root: Optional[str] = None) -> str:
+    """Validate and canonicalize a file path so it stays within the upload jail.
+
+    This prevents path traversal attacks where a crafted ``file_path`` value
+    (e.g. ``../../etc/passwd``) passed through the Celery task queue could
+    cause the worker to read arbitrary files outside the upload directory.
+
+    Parameters
+    ----------
+    file_path:
+        The raw path string received from the task arguments.
+    allowed_root:
+        The directory that the resolved path must be a descendant of.
+        Defaults to the configured ``UPLOAD_TEMP_DIR``.
+
+    Returns
+    -------
+    str
+        The canonicalized absolute path, guaranteed to be inside *allowed_root*.
+
+    Raises
+    ------
+    ValidationError
+        If the resolved path escapes *allowed_root* or the path is empty.
+    """
+    if not file_path or not file_path.strip():
+        raise ValidationError(detail="file_path must not be empty.")
+
+    if allowed_root is None:
+        # Import lazily to avoid circular imports at module load time.
+        try:
+            from api.config import get_settings as _get_settings
+            _settings = _get_settings()
+            allowed_root = _settings.UPLOAD_TEMP_DIR
+        except Exception:
+            import tempfile
+            allowed_root = tempfile.gettempdir()
+
+    try:
+        resolved = Path(file_path).resolve()
+        jail = Path(allowed_root).resolve()
+    except Exception as exc:
+        raise ValidationError(detail=f"Invalid file_path: {exc}") from exc
+
+    # Path.is_relative_to() is Python 3.9+; use str prefix check for 3.8 compat.
+    try:
+        resolved.relative_to(jail)
+    except ValueError:
+        logger.warning(
+            "path_traversal_attempt_blocked",
+            file_path=file_path,
+            resolved=str(resolved),
+            jail=str(jail),
+        )
+        raise ValidationError(
+            detail="file_path must be within the upload directory.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return str(resolved)

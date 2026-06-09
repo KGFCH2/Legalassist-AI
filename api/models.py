@@ -2,7 +2,7 @@
 Pydantic models for API requests/responses
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, EmailStr
 
 
@@ -36,6 +36,22 @@ class APIKeyResponse(BaseModel):
     key: str  # Only shown on creation
     created_at: datetime
     expires_at: Optional[datetime]
+
+
+class APIKey:
+    """API Key data model (non-Pydantic, used internally by auth logic)."""
+    def __init__(self, key_id: str, name: str, key_hash: str, created_at: datetime,
+                 expires_at: Optional[datetime] = None):
+        self.key_id = key_id
+        self.name = name
+        self.key_hash = key_hash
+        self.created_at = created_at
+        self.expires_at = expires_at
+
+    def is_valid(self) -> bool:
+        if self.expires_at and datetime.utcnow() > self.expires_at:
+            return False
+        return True
 
 
 # ============================================================================
@@ -263,12 +279,12 @@ class AnonymizedShareResponse(BaseModel):
 class ReportGenerationRequest(BaseModel):
     """Request to generate a report"""
     case_id: str
-    report_type: str = "comprehensive"  # comprehensive, summary, legal_brief
+    report_type: Literal["comprehensive", "summary", "legal_brief"] = "comprehensive"
     include_remedies: bool = True
     include_timeline: bool = True
     include_similar_cases: bool = True
-    format: str = "pdf"  # pdf, docx, html
-    style: str = "formal"  # formal, casual
+    format: Literal["pdf", "docx", "html"] = "pdf"
+    style: Literal["formal", "casual"] = "formal"
     privacy_profile: str = "personal_identifiers"
 
 

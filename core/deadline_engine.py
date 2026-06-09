@@ -12,6 +12,7 @@ def _parse_date(value: Any, tz: str) -> datetime:
         try:
             dt = datetime.fromisoformat(str(value))
         except ValueError:
+            # Fall back to space-separated SQLite datetimes for Python 3.10
             dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
     if dt.tzinfo is None:
@@ -39,8 +40,28 @@ _JURISDICTION_WEEKENDS = {
     "PK": {5, 6},       # Sat–Sun (Pakistan)
 }
 
+COURT_HOLIDAYS = {
+    "IN_SC": [
+        "2026-01-26",  # Republic Day
+        "2026-03-03",  # Holi
+        "2026-08-15",  # Independence Day
+        "2026-10-02",  # Gandhi Jayanti
+        "2026-11-08",  # Diwali
+        "2026-12-25",  # Christmas
+    ],
+    "IN_DHC": [
+        "2026-01-26",
+        "2026-03-03",
+        "2026-08-15",
+        "2026-10-02",
+        "2026-11-08",
+        "2026-12-25",
+    ],
+}
+
 
 def _is_weekend(dt: date, jurisdiction: Optional[str] = None) -> bool:
+    # Check jurisdiction-specific weekend days mapped in dictionary
     weekend_days = _JURISDICTION_WEEKENDS.get(jurisdiction.upper() if jurisdiction else "", {5, 6})
     return dt.weekday() in weekend_days
 
@@ -72,12 +93,17 @@ def calculate_deadline(
     if holidays:
         for h in holidays:
             try:
+                # Confirm holiday date matches ISO YYYY-MM-DD pattern
                 date.fromisoformat(h)
             except (ValueError, TypeError):
                 raise ValueError(
                     f"Invalid holiday date format: {h!r}. Expected YYYY-MM-DD."
                 )
         holidays_set = set(holidays)
+
+    if jurisdiction:
+        for h in COURT_HOLIDAYS.get(jurisdiction.upper(), []):
+            holidays_set.add(h)
 
     remaining = max(0, int(business_days))
     current = dt
@@ -103,6 +129,7 @@ def calculate_deadline(
 
     # Normalize even when business_days==0 (e.g. start is a weekend/holiday)
     if int(business_days) == 0:
+        # Perform rolling forward adjustment for weekends and holidays
         current = _roll_forward(current)
 
     adjusted_for_weekends_holidays = current
@@ -127,11 +154,16 @@ def calculate_deadline(
     # Apply adjustments sequentially so each step normalizes independently.
     final = adjusted_for_weekends_holidays
     if jurisdiction_adjustment:
+        # Sequentially apply the filing cutoff adjustments first
         final += timedelta(days=jurisdiction_adjustment)
         final = _roll_forward(final)
     if emergency_extension_days:
         final += timedelta(days=int(emergency_extension_days))
         final = _roll_forward(final)
+
+    # Recheck if the final date with adjustments lands on a holiday/weekend
+    while (exclude_weekends and _is_weekend(final.date(), jurisdiction)) or (final.date().isoformat() in holidays_set):
+        final = final + timedelta(days=1)
 
     return {
         "deadline": final.isoformat(),
@@ -147,3 +179,24 @@ def calculate_deadline(
 
 
 __all__ = ["calculate_deadline"]
+
+
+_DEADLINE_TYPE_FIRST_ACTIONS: Dict[str, str] = {
+    "appeal": "File appeal memo",
+    "filing": "Gather filing documents",
+    "submission": "Prepare and submit the required filing",
+    "response": "Draft the response and review supporting records",
+    "hearing": "Consult counsel and prepare the hearing bundle",
+    "order": "Review the order and confirm the next step",
+    "other": "Review the deadline details and plan the next step",
+    "manual": "Review the deadline details and plan the next step",
+}
+
+
+def get_deadline_first_action(deadline_type: Optional[str]) -> str:
+    """Return a short deterministic next-action suggestion for a deadline type."""
+    normalized = str(deadline_type or "other").strip().lower()
+    return _DEADLINE_TYPE_FIRST_ACTIONS.get(normalized, "Review the deadline details and plan the next step")
+
+
+__all__.append("get_deadline_first_action")

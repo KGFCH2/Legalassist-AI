@@ -68,14 +68,8 @@ def mock_report():
     report.status = ReportStatus.PENDING
     report.report_type = ReportType.COMPREHENSIVE
     report.format = ReportFormat.PDF
-    report.style = "formal"
-    report.file_path = None
-    report.file_size_bytes = None
-    report.error_message = None
     report.created_at = datetime.utcnow()
-    report.started_at = None
     report.completed_at = None
-    report.updated_at = datetime.utcnow()
     report.case = Mock()
     report.user = Mock()
     return report

@@ -4,16 +4,33 @@ The project has moved models and CRUD helpers into the `db/` package, but many
 existing imports still point at `database`. This module re-exports the pieces
 needed by the current codebase and keeps the authentication/OTP security path
 working while the refactor continues.
+
+CRITICAL: This file should be a PURE RE-EXPORT MODULE. All implementations must
+come from db/ subpackages. Do not define duplicate functions here.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from typing import Optional, List
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.base import Base
 from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+
+_OTP_RATE_LIMIT_LOCK = threading.RLock()
+_OTP_RATE_LIMIT_EVENTS: dict[str, list[dt.datetime]] = {}
+
+
+def _otp_rate_limit_key(identifier: str) -> str:
+    normalized = str(identifier).strip().lower().replace("@", "")
+    if not normalized:
+        raise ValueError("OTP request identifier is required")
+    return f"otp:rate:{normalized}"
+
+
 from db.models import (
     User,
     OTPVerification,
@@ -27,6 +44,11 @@ from db.models import (
     CaseDocument,
     Attachment,
     CaseTimeline,
+    CaseNote,
+    CaseNoteVersion,
+    AnonymizedShareToken,
+    CaseComment,
+    CasePresence,
     CaseStatus,
     DocumentType,
     UserFeedback,
@@ -43,23 +65,75 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
-    CaseNote,
-    CaseNoteVersion,
-    Report,
-    ReportStatus,
-    ReportType,
-    ReportFormat,
 )
+
 from db.crud.notifications import (
     create_case_deadline,
     get_upcoming_deadlines,
     has_notification_been_sent,
     log_notification,
     get_notification_history,
+    reserve_notification,
+    update_notification_result,
 )
-from db.case_service import save_case_note_draft, publish_case_note, get_case_note_history
-from db.otp_service import revoke_token, is_token_revoked, cleanup_expired_revoked_tokens
 
+from db.crud.users import (
+    get_user_by_email,
+    create_user,
+    update_user_last_login,
+    create_otp_verification,
+    get_pending_otp,
+    mark_otp_as_used,
+    is_email_locked_out,
+    record_otp_failed_attempt,
+    reset_otp_failed_attempts,
+    cleanup_expired_otps,
+    create_or_update_user_preference,
+)
+
+from db.crud.cases import (
+    create_case,
+    get_user_cases,
+    get_case_by_id,
+    get_case_by_number,
+    update_case_status,
+    delete_case,
+    create_case_document,
+    get_case_documents,
+    get_case_document_by_id,
+    create_case_record,
+    get_case_record,
+    get_cases_by_criteria,
+    update_case_outcome,
+    submit_user_feedback,
+    get_user_feedback,
+    submit_model_feedback,
+    get_case_timeline,
+    create_timeline_event,
+    create_attachment,
+    get_attachments_for_case,
+    get_user_stats,
+    get_similarity_feedback,
+)
+
+from db.crud.tokens import (
+    revoke_token,
+    cleanup_expired_revoked_tokens,
+    is_token_revoked,
+)
+
+from db.case_service import (
+    save_case_note_draft,
+    publish_case_note,
+    get_case_note_history,
+)
+
+from db.crud.comments import (
+    create_case_comment,
+    get_case_comments,
+    upsert_case_presence,
+    get_case_presence,
+)
 
 __all__ = [
     "Base",
@@ -80,6 +154,9 @@ __all__ = [
     "CaseDocument",
     "Attachment",
     "CaseTimeline",
+    "CaseNote",
+    "CaseComment",
+    "CasePresence",
     "CaseStatus",
     "DocumentType",
     "User",
@@ -100,10 +177,11 @@ __all__ = [
     "PrecedentMatch",
     "create_case_deadline",
     "get_upcoming_deadlines",
-    "get_user_deadlines",
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
+    "reserve_notification",
+    "update_notification_result",
     "create_or_update_user_preference",
     "create_user",
     "get_user_by_email",
@@ -135,18 +213,14 @@ __all__ = [
     "create_timeline_event",
     "create_attachment",
     "get_attachments_for_case",
+    "revoke_token",
+    "cleanup_expired_revoked_tokens",
+    "is_token_revoked",
     "CaseNote",
     "CaseNoteVersion",
-    "Report",
-    "ReportStatus",
-    "ReportType",
-    "ReportFormat",
     "save_case_note_draft",
     "publish_case_note",
     "get_case_note_history",
-    "revoke_token",
-    "is_token_revoked",
-    "cleanup_expired_revoked_tokens",
 ]
 
 
@@ -177,13 +251,22 @@ def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
     return user
 
 
-def create_otp_verification(db: Session, email: str, otp_hash: str, expires_at: dt.datetime) -> OTPVerification:
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
+) -> OTPVerification:
     """Create a new OTP verification record"""
-    otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
-    db.add(otp)
-    db.commit()
-    db.refresh(otp)
-    return otp
+    with _OTP_RATE_LIMIT_LOCK:
+        _reserve_otp_rate_limit_slot(db, email, max_requests_per_hour, requester_ip=requester_ip)
+        otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
+        db.add(otp)
+        db.commit()
+        db.refresh(otp)
+        return otp
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
@@ -197,14 +280,14 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Atomically mark OTP as used. Returns True only if OTP was not already used."""
     try:
-        otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-        if otp:
-            otp.is_used = True
-            db.commit()
-            db.refresh(otp)
-            return True
-        return False
+        result = db.query(OTPVerification).filter(
+            OTPVerification.id == otp_id,
+            OTPVerification.is_used == False,
+        ).update({"is_used": True}, synchronize_session=False)
+        db.commit()
+        return result > 0
     except Exception:
         db.rollback()
         return False
@@ -220,29 +303,93 @@ def is_email_locked_out(db: Session, email: str) -> Optional[dt.datetime]:
     return lockout.locked_until if lockout else None
 
 
-def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """Record failed OTP attempt with email-level lockout protection."""
+def record_otp_failed_attempt(
+    db: Session,
+    otp_id: int,
+    lockout_duration_minutes: int = 15,
+    max_failed_attempts: int = 5,
+) -> bool:
+    """Record a failed OTP verification attempt and implement lockout after max attempts.
+
+    Lockout is applied at the **email level**: once *max_failed_attempts* is
+    reached for any single OTP record, every other pending OTP issued to the
+    same email address is locked simultaneously.  This prevents an attacker
+    from cycling through multiple valid OTP tokens to bypass the attempt limit.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        otp_id: Primary-key ID of the OTPVerification record to update.
+        lockout_duration_minutes: Duration to lock out the email after max
+            failed attempts are reached (default: 15 minutes).
+        max_failed_attempts: Number of consecutive failures that trigger a
+            lockout (default: 5).
+
+    Returns:
+        True if the record was updated successfully; False if the OTP was not
+        found.
+    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
         if otp.failed_attempts >= max_failed_attempts:
-            # Lock out at email level, not just OTP level
-            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+            # Lock out at email level, not just OTP level.
+            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                minutes=lockout_duration_minutes
+            )
             otp.locked_until = lockout_until
-            
-            # Also lock all other pending OTPs for same email
+            logger.warning(
+                "OTP email-level lockout applied",
+                email=otp.email,
+                failed_attempts=otp.failed_attempts,
+                locked_until=str(lockout_until),
+            )
+            # Also lock all other pending OTPs for the same email.
             db.query(OTPVerification).filter(
                 OTPVerification.email == otp.email,
-                OTPVerification.id != otp_id
+                OTPVerification.id != otp_id,
             ).update({"locked_until": lockout_until})
-        
+
         db.commit()
         db.refresh(otp)
         return True
     return False
 
+    password_hash = Column(
+        String(255), 
+        nullable=True
+    )
+
+    # -------------------------------------------------------------------------
+    # ORM Relationships
+    # -------------------------------------------------------------------------
+    # We define bidirectional relationships with other core entities here.
+    # The `cascade="all, delete-orphan"` parameter is crucial for maintaining
+    # referential integrity and preventing orphaned records in the database
+    # if a user account is deleted (e.g., for GDPR compliance).
+    # -------------------------------------------------------------------------
+    
+    cases = relationship(
+        "Case", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
+    
+    preferences = relationship(
+        "UserPreference", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
+    """Reset the failed-attempt counter and any lockout on successful verification.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        otp_id: Primary-key ID of the OTPVerification record to reset.
+
+    Returns:
+        True if the record was updated; False if the OTP was not found.
+    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -259,6 +406,65 @@ def cleanup_expired_otps(db: Session) -> int:
     deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
     db.commit()
     return deleted
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+class APIKey(Base):
+    """Stored API key for programmatic access"""
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    key_hash = Column(String(255), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    user = relationship("User", backref="api_keys")
+
+    def __repr__(self):
+        return f"<APIKey(id={self.id}, name='{self.name}', active={self.is_active})>"
+
+
+# Database initialization
+def init_db():
+    """Create all tables"""
+    Base.metadata.create_all(bind=engine)
+
+def cleanup_expired_revoked_tokens(db: Session, batch_size: int = 1000) -> int:
+    """Delete expired revoked tokens in batches to avoid lock contention."""
+    now = dt.datetime.now(dt.timezone.utc)
+    total_deleted = 0
+
+    while True:
+        deleted = db.query(RevokedToken).filter(
+            RevokedToken.expires_at < now
+        ).limit(batch_size).delete(synchronize_session=False)
+        db.commit()
+        total_deleted += deleted
+        if deleted < batch_size:
+            break
+
+    return total_deleted
+
+
+def schedule_token_cleanup():
+    """Standalone cleanup runner for cron/celery scheduling."""
+    from database import SessionLocal, cleanup_expired_revoked_tokens
+    db = SessionLocal()
+    try:
+        deleted = cleanup_expired_revoked_tokens(db)
+        return deleted
+    finally:
+        db.close()
 
 
 def create_case(db: Session, user_id: int, case_number: str, case_type: str, jurisdiction: str, title: Optional[str] = None) -> Case:
@@ -280,6 +486,24 @@ def get_user_cases(db: Session, user_id: int) -> List[Case]:
     """Get all cases for a user"""
     return db.query(Case).filter(Case.user_id == user_id).order_by(Case.created_at.desc()).all()
 
+    # Validate deadline date is not in the past
+    if deadline_date.tzinfo is None:
+        deadline_date = deadline_date.replace(tzinfo=dt.timezone.utc)
+    if deadline_date < dt.datetime.now(dt.timezone.utc):
+        raise ValueError("Deadline date must be in the future")
+
+    deadline = CaseDeadline(
+        user_id=user_id,
+        case_id=normalized_case_id,
+        case_title=case_title,
+        deadline_date=deadline_date,
+        deadline_type=deadline_type,
+        description=description,
+    )
+    db.add(deadline)
+    db.commit()
+    db.refresh(deadline)
+    return deadline
 
 def get_case_by_id(db: Session, case_id: int) -> Optional[Case]:
     """Get a case by ID"""
@@ -305,13 +529,79 @@ def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optiona
 
 
 def delete_case(db: Session, case_id: int) -> bool:
-    """Delete a case and all related data"""
+    """Delete a case and all related data.
+
+    Explicitly removes dependent rows in FK-constraint-safe order before
+    deleting the parent Case record.  Relying solely on ORM-level
+    ``cascade="all, delete-orphan"`` can fail on PostgreSQL (and other
+    databases that enforce referential integrity at the engine level) when
+    related objects are not already loaded into the current session,
+    causing the DELETE to hit a foreign-key violation before SQLAlchemy's
+    lazy-loader can clean them up.
+
+    Deletion order (deepest child first):
+        CaseNoteVersion  -> CaseNote
+        CaseComment (self-referencing replies cascade via FK ondelete)
+        CaseTimeline, CasePresence, Attachment, CaseDocument
+        AnonymizedShareToken, CaseDeadline
+        Case (parent)
+    """
     case = db.query(Case).filter(Case.id == case_id).first()
-    if case:
+    if not case:
+        return False
+
+    try:
+        # --- leaf tables (no children of their own) ---
+        # CaseNoteVersion references both case_notes.id AND cases.id;
+        # remove it before CaseNote to satisfy both FK constraints.
+        db.query(CaseNoteVersion).filter(
+            CaseNoteVersion.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        # Self-referencing replies are handled by ondelete="CASCADE" on
+        # the parent_comment_id FK, so deleting top-level comments is
+        # sufficient — but we must delete all of them before the Case.
+        db.query(CaseComment).filter(
+            CaseComment.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseNote).filter(
+            CaseNote.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseTimeline).filter(
+            CaseTimeline.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CasePresence).filter(
+            CasePresence.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        # Attachments may reference case_documents.id (SET NULL) — delete
+        # attachments before documents to avoid that nullable FK being
+        # needed after document rows are gone.
+        db.query(Attachment).filter(
+            Attachment.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseDocument).filter(
+            CaseDocument.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(AnonymizedShareToken).filter(
+            AnonymizedShareToken.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == case_id
+        ).delete(synchronize_session=False)
+
         db.delete(case)
         db.commit()
         return True
-    return False
+    except Exception:
+        db.rollback()
+        raise
 
 
 def create_case_document(
@@ -376,10 +666,23 @@ def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
     return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
 
 
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
 def get_cases_by_criteria(db: Session, **criteria) -> List[CaseRecord]:
-    """Search case records by criteria"""
+    """Search case records by approved criteria fields only."""
     query = db.query(CaseRecord)
     for key, value in criteria.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
         if hasattr(CaseRecord, key) and value:
             query = query.filter(getattr(CaseRecord, key) == value)
     return query.all()
@@ -419,6 +722,64 @@ def update_case_outcome(
     return outcome
 
 
+def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
+    """Get a case record by ID"""
+    return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
+
+
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
+def get_cases_by_criteria(
+    db: Session,
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
+    court_name: Optional[str] = None,
+    judge_name: Optional[str] = None,
+    plaintiff_type: Optional[str] = None,
+    defendant_type: Optional[str] = None,
+    outcome: Optional[str] = None,
+    limit: int = 100,
+) -> List[CaseRecord]:
+    """Get cases matching approved criteria fields only."""
+    query = db.query(CaseRecord)
+
+    filters = {
+        "case_type": case_type,
+        "jurisdiction": jurisdiction,
+        "court_name": court_name,
+        "judge_name": judge_name,
+        "plaintiff_type": plaintiff_type,
+        "defendant_type": defendant_type,
+        "outcome": outcome,
+    }
+    for key, value in filters.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
+        if value:
+            query = query.filter(getattr(CaseRecord, key) == value)
+
+    return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQL LIKE wildcard characters in a user-supplied string.
+
+    Both ``%`` and ``_`` are prefixed with the escape character (``\\``) so
+    they are treated as literals rather than wildcards when used in a LIKE
+    expression with ``escape='\\'``.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def submit_user_feedback(
     db: Session,
     user_id: int,
@@ -448,14 +809,90 @@ def get_user_feedback(db: Session, user_id: int) -> List[UserFeedback]:
     return db.query(UserFeedback).filter(UserFeedback.user_id == user_id).order_by(UserFeedback.created_at.desc()).all()
 
 
-def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
-    """Get all active deadlines for a user"""
+# ==================== User & Authentication Helper Functions ====================
+
+
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    """Get user by email address"""
+    return db.query(User).filter(User.email == email).first()
+
+
+def create_user(db: Session, email: str) -> User:
+    """Create a new user"""
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def update_user_last_login(db: Session, user_id: int) -> User:
+    """Update user's last login timestamp"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
+
+
+# Thread lock for OTP rate-limit enforcement (single source of truth).
+_otp_rate_limit_lock = threading.Lock()
+
+
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+) -> OTPVerification:
+    """Create a new OTP verification record with rate limiting.
+
+    This is the single source of truth for OTP rate-limit enforcement.
+    All callers (auth.py, API routes, etc.) must go through this function to
+    ensure consistent throttling behavior across the entire application.
+    """
+    with _otp_rate_limit_lock:
+        one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+        recent_otps = db.query(OTPVerification).filter(
+            OTPVerification.email == email,
+            OTPVerification.created_at >= one_hour_ago,
+        ).count()
+
+        if recent_otps >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
+        otp = OTPVerification(
+            email=email,
+            otp_hash=otp_hash,
+            expires_at=expires_at,
+        )
+        db.add(otp)
+        db.commit()
+        db.refresh(otp)
+        return otp
+
+
+def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
+    """Get unused, non-expired OTP for email"""
     now = dt.datetime.now(dt.timezone.utc)
-    return db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
-        CaseDeadline.deadline_date > now,
-    ).order_by(CaseDeadline.deadline_date).all()
+    return db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.is_used == False,
+        OTPVerification.expires_at > now,
+    ).order_by(OTPVerification.created_at.desc()).first()
+
+
+def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Mark an OTP as used"""
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.is_used = True
+        db.commit()
+        return True
+    return False
+
 
 
 def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
@@ -475,9 +912,46 @@ def get_notification_template_for_user(db: Session, user_id: int) -> Optional[No
     return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
 
 
-def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> bool:
-    """Internal helper for OTP rate limiting - mockable for tests"""
-    # In the real app, this would use Redis or similar
+def _reserve_otp_rate_limit_slot(
+    db: Session,
+    email: str,
+    max_requests_per_hour: int,
+    requester_ip: Optional[str] = None,
+) -> bool:
+    """Reserve an OTP request slot for the email, with optional IP tracking."""
+    if max_requests_per_hour <= 0:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    normalized_email = str(email).strip().lower()
+    if not normalized_email:
+        raise ValueError("OTP request email is required")
+
+    now = dt.datetime.now(dt.timezone.utc)
+    window_start = now - dt.timedelta(hours=1)
+
+    with _OTP_RATE_LIMIT_LOCK:
+        recent_email_requests = db.query(OTPVerification).filter(
+            func.lower(OTPVerification.email) == normalized_email,
+            OTPVerification.created_at >= window_start,
+        ).count()
+        if recent_email_requests >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
+        email_key = _otp_rate_limit_key(f"email:{normalized_email}")
+        email_events = _OTP_RATE_LIMIT_EVENTS.setdefault(email_key, [])
+        email_events[:] = [ts for ts in email_events if ts >= window_start]
+        if len(email_events) >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+        email_events.append(now)
+
+        if requester_ip:
+            normalized_ip = str(requester_ip).strip().lower()
+            if normalized_ip:
+                ip_key = _otp_rate_limit_key(f"ip:{normalized_ip}")
+                ip_events = _OTP_RATE_LIMIT_EVENTS.setdefault(ip_key, [])
+                ip_events[:] = [ts for ts in ip_events if ts >= window_start]
+                ip_events.append(now)
+
     return True
 
 
@@ -700,8 +1174,17 @@ def create_attachment(
     size_bytes: Optional[int] = None,
     case_id: Optional[int] = None,
     deadline_id: Optional[int] = None,
-) -> Attachment:
-    """Create a new file attachment record"""
+) -> "Attachment":
+    """Create a new attachment record linked to a case or deadline"""
+    if case_id is not None:
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if not case or case.user_id != user_id:
+            raise PermissionError("case_id not found or not owned by the provided user_id")
+    if deadline_id is not None:
+        deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_id).first()
+        if not deadline or deadline.user_id != user_id:
+            raise PermissionError("deadline_id not found or not owned by the provided user_id")
+
     att = Attachment(
         user_id=user_id,
         original_filename=original_filename,
@@ -722,250 +1205,112 @@ def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
     return db.query(Attachment).filter(Attachment.case_id == case_id).all()
 
 
+# ====================================================================
+# Revocation cache — Redis-backed coordinated cache to prevent
+# thundering herd on token revocation DB queries during bursts.
+# ====================================================================
 
-# Dynamic relationships injection to support legacy collaborative features on Case and User models
-from db.models import Case, User
-from sqlalchemy.orm import relationship
-
-Case.comments = relationship("CaseComment", back_populates="case", cascade="all, delete-orphan", order_by="CaseComment.created_at")
-Case.presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
-User.case_comments = relationship("CaseComment", back_populates="user", cascade="all, delete-orphan")
-User.case_presence = relationship("CasePresence", back_populates="user", cascade="all, delete-orphan")
+_revocation_cache = None
+_revocation_cache_lock = threading.Lock()
 
 
+def _get_revocation_cache():
+    global _revocation_cache
+    if _revocation_cache is not None:
+        return _revocation_cache
+    with _revocation_cache_lock:
+        if _revocation_cache is None:
+            if redis is None:
+                return None
+            redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+            _revocation_cache = redis.from_url(redis_url, decode_responses=True)
+    return _revocation_cache
 
-import enum
-from sqlalchemy import UniqueConstraint, ForeignKey, Column, Integer, String, DateTime, Text, JSON, Enum as SQLEnum, Boolean
-from sqlalchemy.orm import relationship
-from sqlalchemy.exc import IntegrityError
-from db.models import (
-    ModelPerformance,
-    RevokedToken,
-    SimilarityFeedback
-)
+
+def _is_token_revoked_uncached(db: Session, jti: str) -> bool:
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
-class IdempotencyKeyStatus(str, enum.Enum):
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if token JTI is revoked, using Redis coordinated cache."""
+    cache = _get_revocation_cache()
+    if cache is None:
+        return _is_token_revoked_uncached(db, jti)
 
-class IdempotencyKey(Base):
-    __tablename__ = "idempotency_keys"
-    id = Column(Integer, primary_key=True)
-    key = Column(String(255), unique=True, nullable=False, index=True)
-    method = Column(String(10), nullable=False)
-    path = Column(String(1024), nullable=False)
-    status = Column(SQLEnum(IdempotencyKeyStatus), default=IdempotencyKeyStatus.IN_PROGRESS)
-    response_status = Column(Integer, nullable=True)
-    response_headers = Column(JSON, nullable=True)
-    response_body = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    completed_at = Column(DateTime(timezone=True), nullable=True)
+    cache_key = f"revoked:{jti}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached == "1"
 
-    def __repr__(self):
-        return f"<IdempotencyKey(key={self.key}, status={self.status})>"
+    lock_key = f"{cache_key}:lock"
+    lock_value = str(time.monotonic_ns())
 
-class CaseComment(Base):
-    """Threaded collaboration comment attached to a case."""
-    __tablename__ = "case_comments"
-    __table_args__ = {"extend_existing": True}
+    if cache.set(lock_key, lock_value, nx=True, ex=10):
+        try:
+            revoked = _is_token_revoked_uncached(db, jti)
+            ttl = 3600 if revoked else 300
+            cache.setex(cache_key, ttl, "1" if revoked else "0")
+            return revoked
+        finally:
+            if cache.get(lock_key) == lock_value:
+                cache.delete(lock_key)
 
-    id = Column(Integer, primary_key=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    parent_comment_id = Column(Integer, ForeignKey("case_comments.id", ondelete="CASCADE"), nullable=True, index=True)
-    comment_text = Column(Text, nullable=False)
-    is_resolved = Column(Boolean, default=False, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    for _ in range(50):
+        time.sleep(0.02)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached == "1"
 
-    case = relationship("Case", back_populates="comments")
-    user = relationship("User", back_populates="case_comments")
-    parent_comment = relationship("CaseComment", remote_side=[id], back_populates="replies")
-    replies = relationship("CaseComment", back_populates="parent_comment", cascade="all, delete-orphan")
+    return _is_token_revoked_uncached(db, jti)
 
-    def __repr__(self):
-        return f"<CaseComment(case_id={self.case_id}, user_id={self.user_id})>"
 
-class CasePresence(Base):
-    """Tracks recently active collaborators on a case."""
-    __tablename__ = "case_presence"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    active_view = Column(String(255), nullable=True)
-    cursor_anchor = Column(String(255), nullable=True)
-    last_seen = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    case = relationship("Case", back_populates="presence_updates")
-    user = relationship("User", back_populates="case_presence")
-
-    __table_args__ = (UniqueConstraint("case_id", "user_id", name="uq_case_presence_user"), {"extend_existing": True})
-
-    def __repr__(self):
-        return f"<CasePresence(case_id={self.case_id}, user_id={self.user_id}, last_seen={self.last_seen})>"
-
-def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> Tuple[IdempotencyKey, bool]:
-    """Attempt to reserve an idempotency key; returns (instance, created_bool)"""
-    from sqlalchemy.exc import IntegrityError
-
-    ik = IdempotencyKey(key=key, method=method, path=path, status=IdempotencyKeyStatus.IN_PROGRESS)
-    try:
-        db.add(ik)
-        db.commit()
-        db.refresh(ik)
-        return ik, True
-    except IntegrityError:
-        db.rollback()
-        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
-        return existing, False
-
-def set_idempotency_response(db: Session, key: str, status_code: int, headers: dict, body: str) -> IdempotencyKey:
-    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).with_for_update(read=True).first()
-    if not ik:
-        ik = IdempotencyKey(key=key, method="POST", path="unknown")
-    ik.response_status = status_code
-    ik.response_headers = headers
-    ik.response_body = body
-    ik.status = IdempotencyKeyStatus.COMPLETED
-    ik.completed_at = dt.datetime.now(dt.timezone.utc)
-    db.add(ik)
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revocation blacklist"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
     db.commit()
-    db.refresh(ik)
-    return ik
+    db.refresh(token)
+    return token
 
-def get_idempotency_response(db: Session, key: str):
-    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key, IdempotencyKey.status == IdempotencyKeyStatus.COMPLETED).first()
-    if not ik:
-        return None
-    return {
-        "status_code": ik.response_status,
-        "headers": ik.response_headers or {},
-        "body": ik.response_body or "",
-    }
 
-def reserve_notification(
-    db: Session,
-    deadline_id: int,
-    user_id: int,
-    channel: NotificationChannel,
-    recipient: str,
-    days_before: int,
-    message_preview: Optional[str] = None,
-) -> Tuple[NotificationLog, bool]:
-    """Attempt to reserve a notification slot by inserting a PENDING record.
-
-    Returns tuple (NotificationLog, created_bool). If created_bool is False,
-    an existing log was found and reservation failed (another worker reserved it).
-    """
-    from sqlalchemy.exc import IntegrityError
-
-    log = NotificationLog(
-        deadline_id=deadline_id,
-        user_id=user_id,
-        channel=channel,
-        recipient=recipient,
-        days_before=days_before,
-        status=NotificationStatus.PENDING,
-        message_preview=message_preview,
-    )
-    try:
-        db.add(log)
-        db.commit()
-        db.refresh(log)
-        return log, True
-    except IntegrityError:
-        db.rollback()
-        existing = db.query(NotificationLog).filter(
-            NotificationLog.deadline_id == deadline_id,
-            NotificationLog.days_before == days_before,
-            NotificationLog.channel == channel,
-        ).first()
-        return existing, False
-
-def update_notification_result(
-    db: Session,
-    deadline_id: int,
-    user_id: int,
-    days_before: int,
-    channel: NotificationChannel,
-    status: NotificationStatus,
-    message_id: Optional[str] = None,
-    error_message: Optional[str] = None,
-    message_preview: Optional[str] = None,
-) -> NotificationLog:
-    """Update an existing notification log if present, otherwise create one.
-
-    This function is resilient to races and will upsert the record appropriately.
-    """
-    existing = db.query(NotificationLog).filter(
-        NotificationLog.deadline_id == deadline_id,
-        NotificationLog.days_before == days_before,
-        NotificationLog.channel == channel,
-    ).with_for_update(read=True).first()
-
-    if existing:
-        existing.status = status
-        existing.message_id = message_id or existing.message_id
-        existing.error_message = error_message or existing.error_message
-        existing.message_preview = message_preview or existing.message_preview
-        if status == NotificationStatus.SENT:
-            existing.sent_at = dt.datetime.now(dt.timezone.utc)
-        db.add(existing)
-        db.commit()
-        db.refresh(existing)
-        return existing
-
-    # Not found - create a new log record
-    return log_notification(
-        db=db,
-        deadline_id=deadline_id,
-        user_id=user_id,
-        channel=channel,
-        recipient="unknown",
-        days_before=days_before,
-        status=status,
-        message_id=message_id,
-        error_message=error_message,
-        message_preview=message_preview,
-    )
-
-def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List[ModelPerformance]:
-    """Compute simple model performance aggregates from `model_feedback` rows."""
+def aggregate_model_performance(db: Session, task: str = None) -> list:
     return []
 
-def schedule_token_cleanup():
-    """Standalone cleanup runner for cron/celery scheduling."""
-    from database import SessionLocal, cleanup_expired_revoked_tokens
-    db = SessionLocal()
-    try:
-        deleted = cleanup_expired_revoked_tokens(db)
-        return deleted
-    finally:
-        db.close()
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Remove expired tokens from the blacklist"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete(synchronize_session=False)
+    db.commit()
+    return deleted
+
 
 def submit_similarity_feedback(
     db: Session,
-    user_id: str,
-    candidate_case_id: int,
-    query_signature: str,
-    relevance: bool,
-) -> SimilarityFeedback:
-    """Persist feedback for a similarity search result"""
-    feedback = SimilarityFeedback(
-        user_id=str(user_id),
-        candidate_case_id=candidate_case_id,
-        query_signature=query_signature,
-        relevance=relevance,
+    case_id: int,
+    event_type: str,
+    description: str,
+    event_date: Optional[dt.datetime] = None,
+    metadata: Optional[dict] = None,
+) -> CaseTimeline:
+    """Create a new timeline event.
+    
+    Note: Ensures that the instantiated CaseTimeline is correctly added to the
+    session using the explicit local variable reference to prevent NameErrors.
+    """
+    event = CaseTimeline(
+        case_id=case_id,
+        event_type=event_type,
+        description=description,
+        event_date=event_date or dt.datetime.now(dt.timezone.utc),
+        event_metadata=metadata,
     )
     db.add(feedback)
     db.commit()
     db.refresh(feedback)
     return feedback
+
 
 def get_similarity_feedback(
     db: Session,
@@ -984,98 +1329,7 @@ def get_similarity_feedback(
     if candidate_case_id is not None:
         query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
 
-def create_case_comment(
-    db: Session,
-    case_id: int,
-    user_id: int,
-    comment_text: str,
-    parent_comment_id: Optional[int] = None,
-) -> CaseComment:
-    """Create a threaded collaboration comment for a case."""
-    case = db.query(Case).filter(Case.id == case_id, Case.user_id == user_id).first()
-    if not case:
-        raise PermissionError("case_id not found or not owned by the provided user_id")
+    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
 
-    if parent_comment_id is not None:
-        parent_comment = db.query(CaseComment).filter(
-            CaseComment.id == parent_comment_id,
-            CaseComment.case_id == case_id,
-        ).first()
-        if not parent_comment:
-            raise ValueError("parent_comment_id is invalid for this case")
 
-    text = (comment_text or "").strip()
-    if not text:
-        raise ValueError("comment_text cannot be empty")
 
-    comment = CaseComment(
-        case_id=case_id,
-        user_id=user_id,
-        parent_comment_id=parent_comment_id,
-        comment_text=text,
-    )
-    db.add(comment)
-    db.commit()
-    db.refresh(comment)
-
-    create_timeline_event(
-        db=db,
-        case_id=case_id,
-        event_type="comment_replied" if parent_comment_id else "comment_added",
-        description=text[:240],
-        metadata={
-            "comment_id": comment.id,
-            "parent_comment_id": parent_comment_id,
-        },
-    )
-    return comment
-
-def get_case_comments(db: Session, case_id: int) -> List[CaseComment]:
-    """Get threaded case comments ordered by creation time."""
-    return db.query(CaseComment).filter(
-        CaseComment.case_id == case_id
-    ).order_by(CaseComment.created_at.asc()).all()
-
-def upsert_case_presence(
-    db: Session,
-    case_id: int,
-    user_id: int,
-    active_view: Optional[str] = None,
-    cursor_anchor: Optional[str] = None,
-) -> CasePresence:
-    """Mark a collaborator as recently active on a case."""
-    case = db.query(Case).filter(Case.id == case_id, Case.user_id == user_id).first()
-    if not case:
-        raise PermissionError("case_id not found or not owned by the provided user_id")
-
-    presence = db.query(CasePresence).filter(
-        CasePresence.case_id == case_id,
-        CasePresence.user_id == user_id,
-    ).first()
-
-    now = dt.datetime.now(dt.timezone.utc)
-    if presence:
-        presence.active_view = active_view
-        presence.cursor_anchor = cursor_anchor
-        presence.last_seen = now
-    else:
-        presence = CasePresence(
-            case_id=case_id,
-            user_id=user_id,
-            active_view=active_view,
-            cursor_anchor=cursor_anchor,
-            last_seen=now,
-        )
-        db.add(presence)
-
-    db.commit()
-    db.refresh(presence)
-    return presence
-
-def get_case_presence(db: Session, case_id: int, active_window_minutes: int = 5) -> List[CasePresence]:
-    """Return collaborators active within a recent time window."""
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=active_window_minutes)
-    return db.query(CasePresence).filter(
-        CasePresence.case_id == case_id,
-        CasePresence.last_seen >= cutoff,
-    ).order_by(CasePresence.last_seen.desc()).all()

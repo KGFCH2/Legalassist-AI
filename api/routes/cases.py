@@ -7,6 +7,8 @@ GET /api/v1/cases/{id}/timeline - Get case timeline
 from datetime import datetime, timedelta, timezone
 from typing import Dict
 
+from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Form, Request, Query
+from sqlalchemy.orm import Session
 from fastapi import APIRouter, HTTPException, status, Depends
 from api.models import (
     CaseSearchRequest, CaseSearchResponse, CaseResult,
@@ -456,8 +458,8 @@ async def upload_case_document_endpoint(
     summary="List user's cases"
 )
 async def list_cases(
-    limit: int = 10,
-    offset: int = 0,
+    limit: int = Query(default=10, ge=1, le=100, description="Maximum number of cases to return (1–100)"),
+    offset: int = Query(default=0, ge=0, description="Number of cases to skip"),
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:

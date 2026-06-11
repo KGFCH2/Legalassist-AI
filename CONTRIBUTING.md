@@ -1,4 +1,7 @@
-# Contributing Guide
+# Contributing
+
+## Local Testing
+Run `pytest` to verify changes. Guide
 
 ## Regional Legal Help Directory
 

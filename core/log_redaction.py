@@ -94,6 +94,9 @@ def _replace_sensitive_text(value: str) -> str:
 def sanitize_log_text(value: Optional[str]) -> str:
     if value is None:
         return ""
+    return _replace_sensitive_text(str(value))
+    if value is None:
+        return ""
     return _replace_sensitive_text(str(value)).replace("\r", "\\r").replace("\n", "\\n")
 
 

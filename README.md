@@ -43,7 +43,7 @@ intermediaries for basic updates. The judiciary is stuck with manual records and
 ## Developer Setup & Running Tests
 
 ### Local Setup
-1. Create a virtual environment:
+1. Create and activate a virtual environment:
    ```bash
    python -m venv venv
    .\venv\Scripts\activate  # On Windows

@@ -386,3 +386,9 @@ class ConfigSanitizer:
 def get_settings() -> APISettings:
     """Get API settings"""
     return APISettings()
+
+
+# --- Timezone Strategy ---
+# Centralized Clock utility flag for API layer
+USE_CLOCK_UTILITY = os.getenv("USE_CLOCK_UTILITY", "true").lower() == "true"
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")

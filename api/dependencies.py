@@ -19,11 +19,6 @@ async def get_rate_limit_key(
 ) -> str:
     """Return a per-identity rate-limit key.
 
-    Security fix: unauthenticated requests are now keyed by source IP rather
-    than the shared literal ``"anonymous"``.  The previous behaviour allowed a
-    single attacker to exhaust the entire anonymous quota and lock out every
-    other unauthenticated user (login, OTP, password-reset) simultaneously.
-
     Resolution order:
     1. Authenticated user  → ``user:<user_id>``   (unchanged)
     2. Unauthenticated     → ``ip:<client_ip>``   (was: ``"anonymous"``)
@@ -33,7 +28,7 @@ async def get_rate_limit_key(
         return f"user:{current_user.user_id}"
 
     from api.limiter import resolve_rate_limit_identifier
-    return resolve_rate_limit_identifier(request)
+    return resolve_rate_limit_identifier(request, current_user=current_user)
 
 
 async def verify_api_version(
@@ -71,7 +66,9 @@ def get_db_rls(
         if _is_postgres:
             try:
                 clear_rls_context(db)
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.error(f"Dependency error: {e}")
                 pass
         db.close()
 
@@ -183,3 +180,29 @@ def evaluate_policy(
     """
     user_ctx = _current_user_to_context(current_user)
     return evaluate(user_ctx, resource_type, action, resource, db)
+def check_permission(permission: str):
+    """Dependency that enforces a specific permission on the current user."""
+    from api.rbac import has_permission
+    async def dependency(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        if not has_permission(current_user.role, permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied. Required permission: {permission}"
+            )
+        return current_user
+    return dependency
+
+
+def check_min_role(min_role: str):
+    """Dependency that enforces a minimum hierarchical role on the current user."""
+    ROLE_HIERARCHY = ["client", "paralegal", "attorney", "admin"]
+    async def dependency(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        user_level = ROLE_HIERARCHY.index(current_user.role) if current_user.role in ROLE_HIERARCHY else 0
+        min_level = ROLE_HIERARCHY.index(min_role) if min_role in ROLE_HIERARCHY else 0
+        if user_level < min_level:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{current_user.role}' is below minimum required role '{min_role}'",
+            )
+        return current_user
+    return dependency

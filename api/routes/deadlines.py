@@ -14,6 +14,8 @@ from core.policy_engine import PolicyDecision
 from db.models.cases import Case, CaseDeadline
 import structlog
 from datetime import datetime, timedelta, timezone
+from core.clock import Clock
+from database import get_db, UserPreference, CaseDeadline
 
 router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
@@ -57,16 +59,56 @@ def _load_reminder_settings(user_id: str) -> tuple:
             db.close()
 
 
-def _deadline_to_response(deadline: CaseDeadline) -> DeadlineResponse:
-    now = datetime.now(timezone.utc)
-    days_until = deadline.days_until_deadline()
+def _deadline_priority(days_until: int) -> str:
+    """Map days until deadline to priority level."""
+    if days_until <= 3:
+        return "critical"
+    elif days_until <= 7:
+        return "high"
+    elif days_until <= 14:
+        return "medium"
+    return "low"
+
+
+def _normalize_utc_datetime(value) -> datetime:
+    """Ensure datetime is UTC-aware. Idempotent."""
+    if value is None:
+        return Clock.now()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return Clock.now()
+
+
+def _days_until_due(due_date: datetime, now: datetime) -> int:
+    """Calculate calendar days until due date."""
+    if due_date is None:
+        return 0
+    due = _normalize_utc_datetime(due_date)
+    now = _normalize_utc_datetime(now)
+    return max(0, (due.date() - now.date()).days)
+
+
+def _deadline_to_response(deadline) -> DeadlineResponse:
+    """Convert a CaseDeadline DB object to a DeadlineResponse."""
+    from db.session import _to_utc_datetime
+    now = Clock.now()
+    due_date = _to_utc_datetime(deadline.deadline_date)
+    days_until = max(0, (due_date.date() - now.date()).days)
     return DeadlineResponse(
         deadline_id=str(deadline.id),
         user_id=str(deadline.user_id),
         case_id=str(deadline.case_id),
         title=deadline.case_title,
         description=deadline.description or "",
-        due_date=deadline.deadline_date,
+        due_date=due_date,
         days_until_due=days_until,
         priority=_deadline_priority(days_until),
         status=deadline.status.value if hasattr(deadline.status, "value") else str(deadline.status),
@@ -92,8 +134,6 @@ async def get_upcoming_deadlines(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
         days=days,
-        limit=limit,
-        offset=offset,
     )
 
     reminder_enabled, reminder_days = _load_reminder_settings(current_user.user_id)
@@ -129,7 +169,7 @@ async def get_upcoming_deadlines(
         medium_count=medium,
         low_count=low,
         deadlines=deadlines,
-        generated_at=now,
+        generated_at=Clock.now()
     )
 
 
@@ -141,10 +181,17 @@ async def get_upcoming_deadlines(
 async def get_deadline_details(
     deadline_id: str,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db_rls),
+    db: Session = Depends(get_db),
 ) -> DeadlineResponse:
     logger.info(
         "Fetching deadline",
+        deadline_id=deadline_id,
+        user_id=current_user.user_id
+    )
+    
+    reminder_enabled, reminder_days = _load_reminder_settings(current_user.user_id)
+    now = Clock.now()
+    return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,
     )
@@ -219,6 +266,11 @@ async def create_deadline(
         )
 
     now = datetime.now(timezone.utc)
+        title=title
+    )
+    
+    reminder_enabled, pref_reminder_days = _load_reminder_settings(current_user.user_id)
+    now = Clock.now()
     days_until = max(0, (due_date.date() - now.date()).days)
 
     deadline = CaseDeadline(
@@ -284,3 +336,44 @@ async def update_deadline(
     db.refresh(deadline)
 
     return _deadline_to_response(deadline)
+        user_id=current_user.user_id
+    )
+    
+    now = Clock.now()
+    effective_due_date = due_date or (now + timedelta(days=7))
+    effective_due_date_utc = (
+        effective_due_date.replace(tzinfo=timezone.utc)
+        if effective_due_date.tzinfo is None
+        else effective_due_date.astimezone(timezone.utc)
+    )
+    days_until = max(0, (effective_due_date_utc.date() - now.date()).days)
+    
+    db = get_db()
+    try:
+        deadline = db.query(CaseDeadline).filter(
+            CaseDeadline.id == deadline_id,
+            CaseDeadline.user_id == int(current_user.user_id)
+        ).first()
+
+        if not deadline:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Deadline not found"
+            )
+
+        if title is not None:
+            deadline.case_title = title
+        if due_date is not None:
+            deadline.deadline_date = due_date
+        deadline.updated_at = Clock.now()
+        db.commit()
+        db.refresh(deadline)
+
+        return _deadline_to_response(deadline)
+    except Exception:
+        if db:
+            db.rollback()
+        raise
+    finally:
+        if db:
+            db.close()

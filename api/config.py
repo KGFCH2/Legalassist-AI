@@ -1,4 +1,7 @@
 import os
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 from pydantic_settings import BaseSettings
 import re
@@ -220,6 +223,12 @@ class Config:
     # --- Rate Limiting ---
     RATE_LIMIT_ENABLED = _get_bool_env("RATE_LIMIT_ENABLED", False)
     REDIS_URL = _get_val("REDIS_URL", "")
+    
+    # --- Circuit Breaker ---
+    CIRCUIT_BREAKER_ENABLED = _get_bool_env("CIRCUIT_BREAKER_ENABLED", True)
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD = float(_get_val("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "0.5"))
+    CIRCUIT_BREAKER_WINDOW_SECONDS = _get_int_env("CIRCUIT_BREAKER_WINDOW_SECONDS", 30)
+    CIRCUIT_BREAKER_COOLDOWN_SECONDS = _get_int_env("CIRCUIT_BREAKER_COOLDOWN_SECONDS", 60)
     RATE_LIMIT_REQUESTS = _get_int_env("RATE_LIMIT_REQUESTS", 100)
     RATE_LIMIT_WINDOW = _get_int_env("RATE_LIMIT_WINDOW", 60)
     RATE_LIMIT_BURST = _get_int_env("RATE_LIMIT_BURST", 10)
@@ -262,7 +271,6 @@ class Config:
     def is_production(cls):
         return cls.APP_ENV in ("production", "prod", "live")
 
-
 import re
 import copy
 
@@ -300,14 +308,15 @@ class ConfigSanitizer:
         "TWILIO_AUTH_TOKEN",
         "SENDGRID_API_KEY",
     }
-    
+
+
+class APISettings(BaseSettings):
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 100  # requests per endpoint window
     RATE_LIMIT_WINDOW: int = 60  # seconds
     RATE_LIMIT_BURST: int = 200  # max burst
 
-    
     # Authentication
     AUTH_ENABLED: bool = True
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
@@ -361,10 +370,19 @@ class ConfigSanitizer:
     ENABLE_OAUTH2: bool = os.getenv("ENABLE_OAUTH2", "true").lower() == "true"
     ENABLE_WEBSOCKET: bool = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"
     ENABLE_ANALYTICS: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
+
+    # Case Anonymization Secret
+    CASE_ANONYMIZATION_SECRET: str = os.getenv("CASE_ANONYMIZATION_SECRET", "default-anonymization-secret-key-at-least-32-chars")
+
+    # Real-time Timeline rate limiting settings
+    TIMELINE_REALTIME_RATE_LIMIT: int = int(os.getenv("TIMELINE_REALTIME_RATE_LIMIT", "30"))
+    TIMELINE_REALTIME_RATE_WINDOW: int = int(os.getenv("TIMELINE_REALTIME_RATE_WINDOW", "60"))
+    TIMELINE_REALTIME_QUEUE_SIZE: int = int(os.getenv("TIMELINE_REALTIME_QUEUE_SIZE", "100"))
     
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "allow"
 
     def sanitized_dict(self) -> Dict[str, Any]:
         """Return settings as a dict with sensitive values masked.
@@ -386,3 +404,9 @@ class ConfigSanitizer:
 def get_settings() -> APISettings:
     """Get API settings"""
     return APISettings()
+
+
+# --- Timezone Strategy ---
+# Centralized Clock utility flag for API layer
+USE_CLOCK_UTILITY = os.getenv("USE_CLOCK_UTILITY", "true").lower() == "true"
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")

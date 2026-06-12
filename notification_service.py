@@ -15,6 +15,8 @@ from enum import Enum
 import html
 import tenacity
 from config import Config
+from domain.deadline import DeadlineEngine
+from domain.notification import NotificationEligibility
 
 # Celery integration for asynchronous task execution
 # We import the celery_app instance defined in the project's central 
@@ -160,7 +162,7 @@ def _derive_first_action(deadline: CaseDeadline) -> str:
     if stored_action:
         return stored_action
 
-    return get_deadline_first_action(getattr(deadline, "deadline_type", None))
+    return DeadlineEngine.first_action(getattr(deadline, "deadline_type", None))
 
 
 def _build_notification_template_values(
@@ -396,6 +398,22 @@ class EmailClient:
 # ASYNCHRONOUS BACKGROUND TASKS
 # ============================================================================
 
+def is_permanent_error(error_msg: str) -> bool:
+    """Return True if the error is a permanent delivery or validation failure,
+    indicating that retrying will not resolve the issue.
+    """
+    if not error_msg:
+        return False
+    msg = error_msg.lower()
+    permanent_patterns = [
+        "bad request", "invalid email", "invalid phone", "missing recipient",
+        "400", "401", "403", "404", "auth", "credential", "unauthorized",
+        "forbidden", "permission", "format", "malformed", "not found",
+        "validation failed"
+    ]
+    return any(p in msg for p in permanent_patterns)
+
+
 @celery_app.task(
     bind=True, 
     name="send_email_task", 
@@ -414,34 +432,13 @@ def send_email_task(
 ) -> dict:
     """
     Celery background task for sending emails via SendGrid.
-    
-    This task offloads the synchronous network call to SendGrid to a background 
-    worker. It also handles logging the result back to the database to ensure 
-    that we maintain an accurate audit trail of all notifications sent.
-    
-    Args:
-        self: The task instance (for retries).
-        to_email (str): Recipient email address.
-        subject (str): Email subject line.
-        html_content (str): The rendered HTML body of the email.
-        deadline_id (int, optional): ID of the deadline for logging.
-        user_id (int, optional): ID of the user for logging.
-        days_left (int, optional): The reminder threshold (e.g., 30, 10, 3, 1).
-        
-    Returns:
-        dict: A summary of the operation results.
     """
     from database import db_session, NotificationStatus, NotificationChannel, update_notification_result
     
     logger.info("background_email_delivery_started", recipient=mask_recipient(to_email), task_id=self.request.id)
     
-    # Initialize the EmailClient inside the task
     client = EmailClient()
-    
-    # Execute the actual network request to SendGrid
     success, message_id, error = client.send_email(to_email, subject, html_content)
-    
-    # Determine the status for database logging
     status = NotificationStatus.SENT if success else NotificationStatus.FAILED
 
     record_immutable_audit_event(
@@ -461,7 +458,6 @@ def send_email_task(
         },
     )
     
-    # Update existing pending reservation (if present) or create a log
     if deadline_id is not None and user_id is not None and days_left is not None:
         try:
             with db_session() as db:
@@ -480,21 +476,25 @@ def send_email_task(
         except Exception as e:
             logger.error("Failed to update background notification", error=str(e), deadline_id=deadline_id)
     
-    # Handle retries if the email failed and we haven't exceeded the limit.
-    # Check for transient errors (503, 429) to use exponential backoff.
-    if not success and error and ('503' in str(error) or '429' in str(error)):
-        if self.request.retries < self.max_retries:
-            backoff_delay = (2 ** self.request.retries) * 60
-            logger.warning(
-                "email_delivery_retry_scheduled", 
-                error=sanitize_log_text(error), 
-                retry_count=self.request.retries + 1,
-                delay_seconds=backoff_delay
-            )
-            raise self.retry(exc=Exception(error), countdown=backoff_delay)
-    elif not success and self.request.retries < self.max_retries:
-        logger.warning("email_delivery_retry_scheduled", error=sanitize_log_text(error), retry_count=self.request.retries + 1)
-        raise self.retry(exc=Exception(error))
+    # Handle retries if the email failed
+    if not success and error:
+        if is_permanent_error(error):
+            logger.error("email_delivery_failed_permanent", recipient=mask_recipient(to_email), error=sanitize_log_text(error))
+        else:
+            # Check for transient errors (503, 429) to use exponential backoff
+            if self.request.retries < self.max_retries:
+                if '503' in str(error) or '429' in str(error) or 'rate' in str(error).lower():
+                    backoff_delay = (2 ** self.request.retries) * 60
+                    logger.warning(
+                        "email_delivery_retry_scheduled_backoff", 
+                        error=sanitize_log_text(error), 
+                        retry_count=self.request.retries + 1,
+                        delay_seconds=backoff_delay
+                    )
+                    raise self.retry(exc=Exception(error), countdown=backoff_delay)
+                else:
+                    logger.warning("email_delivery_retry_scheduled", error=sanitize_log_text(error), retry_count=self.request.retries + 1)
+                    raise self.retry(exc=Exception(error))
     
     return {
         "success": success,
@@ -521,35 +521,14 @@ def send_sms_task(
 ) -> dict:
     """
     Celery background task for sending SMS via Twilio.
-    
-    This task offloads the synchronous network call to Twilio to a background 
-    worker. It also implements an exponential backoff retry mechanism for 
-    handling 503 Server Errors from the third-party provider, ensuring high 
-    reliability of critical client communications even during temporary outages.
-    
-    Args:
-        self: The task instance (for retries).
-        to_number (str): Recipient phone number.
-        message (str): The SMS content.
-        deadline_id (int, optional): ID of the deadline for logging.
-        user_id (int, optional): ID of the user for logging.
-        days_left (int, optional): The reminder threshold (e.g., 30, 10, 3, 1).
-        
-    Returns:
-        dict: A summary of the operation results.
     """
     from database import db_session, NotificationStatus, NotificationChannel
     from db.crud.notifications import update_notification_log_by_keys
     
     logger.info("background_sms_delivery_started", recipient=mask_recipient(to_number), task_id=self.request.id)
     
-    # Initialize the SMSClient inside the task
     client = SMSClient()
-    
-    # Execute the actual network request to Twilio
     success, message_id, error = client.send_sms(to_number, message)
-    
-    # Determine the status for database logging
     status = NotificationStatus.SENT if success else NotificationStatus.FAILED
 
     record_immutable_audit_event(
@@ -569,7 +548,6 @@ def send_sms_task(
         },
     )
     
-    # If logging metadata was provided, persist the result to the database
     if deadline_id is not None and user_id is not None and days_left is not None:
         try:
             with db_session() as db:
@@ -582,29 +560,30 @@ def send_sms_task(
                     status=status,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=_sanitize_preview(html_content, max_length=200),
+                    message_preview=_sanitize_preview(message, max_length=200),
                 )
                 logger.info("background_sms_notification_logged", deadline_id=deadline_id)
         except Exception as e:
             logger.error("background_sms_notification_log_failed", deadline_id=deadline_id, error=sanitize_log_text(str(e)))
     
-    # Retry mechanism for 503 Server Errors using exponential backoff
-    if not success and error and '503' in str(error):
-        if self.request.retries < self.max_retries:
-            # Calculate exponential backoff delay: 2^retry_count * 60 seconds
-            # Example: 1m, 2m, 4m, 8m...
-            backoff_delay = (2 ** self.request.retries) * 60
-            logger.warning(
-                "sms_delivery_retry_scheduled", 
-                error=sanitize_log_text(error), 
-                retry_count=self.request.retries + 1,
-                delay_seconds=backoff_delay
-            )
-            raise self.retry(exc=Exception(error), countdown=backoff_delay)
-    elif not success and self.request.retries < self.max_retries:
-        # Standard retry for other errors
-        logger.warning("sms_delivery_retry_scheduled", error=sanitize_log_text(error), retry_count=self.request.retries + 1)
-        raise self.retry(exc=Exception(error))
+    # Retry mechanism for transient errors using exponential backoff
+    if not success and error:
+        if is_permanent_error(error):
+            logger.error("sms_delivery_failed_permanent", recipient=mask_recipient(to_number), error=sanitize_log_text(error))
+        else:
+            if self.request.retries < self.max_retries:
+                if '503' in str(error) or '429' in str(error) or 'rate' in str(error).lower():
+                    backoff_delay = (2 ** self.request.retries) * 60
+                    logger.warning(
+                        "sms_delivery_retry_scheduled_backoff", 
+                        error=sanitize_log_text(error), 
+                        retry_count=self.request.retries + 1,
+                        delay_seconds=backoff_delay
+                    )
+                    raise self.retry(exc=Exception(error), countdown=backoff_delay)
+                else:
+                    logger.warning("sms_delivery_retry_scheduled", error=sanitize_log_text(error), retry_count=self.request.retries + 1)
+                    raise self.retry(exc=Exception(error))
     
     return {
         "success": success,
@@ -648,16 +627,10 @@ class NotificationService:
         escaped_desc = html.escape(deadline.description) if deadline.description else "No additional details provided."
         escaped_action = html.escape((first_action or _derive_first_action(deadline)).strip())
         
-        # Urgency color coding
-        if days_left <= 3:
-            accent_color = "#ff5252" # Critical Red
-            urgency_label = "URGENT"
-        elif days_left <= 10:
-            accent_color = "#ff9100" # Warning Orange
-            urgency_label = "SOON"
-        else:
-            accent_color = "#1a5490" # Info Blue
-            urgency_label = "REMINDER"
+        # Urgency color coding via domain layer
+        priority = DeadlineEngine.priority(days_left)
+        accent_color = priority.color
+        urgency_label = priority.urgency_label
 
         subject = f"⚖️ {urgency_label}: {_sanitize_subject(deadline.case_title)} - {_sanitize_subject(deadline.deadline_type.title())} Deadline"
         
@@ -1154,8 +1127,8 @@ class NotificationService:
                     days_left=days_left, 
                     user_id=deadline.user_id)
 
-        # Only process at specific thresholds
-        if days_left not in [30, 10, 3, 1]:
+        # Only process at specific thresholds via domain layer
+        if not NotificationEligibility.is_eligible(days_left):
             return results
 
         # Send based on user's notification channel preference
@@ -1168,27 +1141,40 @@ class NotificationService:
 
         notification_language = language or getattr(user_preference, "language", None) or "en"
 
-        for channel in channels:
-            # Check if reminder was already sent for this specific threshold and channel
-            if not has_notification_been_sent(db, deadline.id, days_left, channel, user_id=deadline.user_id):
-                if channel == NotificationChannel.SMS:
-                    result = self.send_sms_reminder(db, deadline, user_preference, days_left, notification_language)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        futures = []
+        with ThreadPoolExecutor(max_workers=max(1, len(channels))) as executor:
+            for channel in channels:
+                # Check if reminder was already sent for this specific threshold and channel
+                if not has_notification_been_sent(db, deadline.id, days_left, channel, user_id=deadline.user_id):
+                    if channel == NotificationChannel.SMS:
+                        futures.append(executor.submit(
+                            self.send_sms_reminder, db, deadline, user_preference, days_left, notification_language
+                        ))
+                    elif channel == NotificationChannel.EMAIL:
+                        futures.append(executor.submit(
+                            self.send_email_reminder, db, deadline, user_preference, days_left, notification_language
+                        ))
+                else:
+                    logger.info("Notification already sent, reporting as successful",
+                                channel=channel.value if hasattr(channel, 'value') else str(channel),
+                                days_left=days_left,
+                                deadline_id=deadline.id)
+                    recipient = getattr(user_preference, "phone_number", None) or getattr(user_preference, "email", "unknown")
+                    results.append(NotificationResult(
+                        success=True,
+                        channel=channel,
+                        recipient=recipient,
+                        message_id=None,
+                        error=None,
+                    ))
+
+            for fut in as_completed(futures):
+                try:
+                    result = fut.result()
                     results.append(result)
-                elif channel == NotificationChannel.EMAIL:
-                    result = self.send_email_reminder(db, deadline, user_preference, days_left, notification_language)
-                    results.append(result)
-            else:
-                logger.info("Notification already sent, reporting as successful",
-                            channel=channel.value,
-                            days_left=days_left,
-                            deadline_id=deadline.id)
-                recipient = getattr(user_preference, "phone_number", None) or getattr(user_preference, "email", "unknown")
-                results.append(NotificationResult(
-                    success=True,
-                    channel=channel,
-                    recipient=recipient,
-                    message_id=None,
-                    error=None,
-                ))
+                except Exception as exc:
+                    logger.exception("Concurrent notification dispatch failed: %s", exc)
 
         return results

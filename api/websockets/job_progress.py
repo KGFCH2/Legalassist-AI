@@ -28,11 +28,14 @@ async def forward_job_events(websocket: WebSocket, job_id: str, bus: JobRealtime
     Sends an initial ``subscribed`` message, then loops awaiting messages
     from the bus.  Closes gracefully when the job reaches a terminal state.
     """
-    await websocket.send_json({
-        "event": "subscribed",
-        "job_id": job_id,
-        "message": "Listening for job progress events"
-    })
+    await asyncio.wait_for(
+        websocket.send_json({
+            "event": "subscribed",
+            "job_id": job_id,
+            "message": "Listening for job progress events"
+        }),
+        timeout=5.0
+    )
     queue = await bus.subscribe(job_id)
     try:
         while True:
@@ -40,10 +43,13 @@ async def forward_job_events(websocket: WebSocket, job_id: str, bus: JobRealtime
                 payload = await asyncio.wait_for(queue.get(), timeout=30.0)
             except asyncio.TimeoutError:
                 # Send keepalive ping so client knows connection is alive
-                await websocket.send_json({"event": "ping", "job_id": job_id})
+                await asyncio.wait_for(
+                    websocket.send_json({"event": "ping", "job_id": job_id}),
+                    timeout=5.0
+                )
                 continue
 
-            await websocket.send_json(payload)
+            await asyncio.wait_for(websocket.send_json(payload), timeout=5.0)
 
             # Terminal states close the connection naturally
             if payload.get("event") in ("completed", "failed", "cancelled"):
@@ -126,9 +132,18 @@ def register_job_progress_endpoint(app: FastAPI) -> None:
             except (TypeError, ValueError):
                 pass
 
+        # Extract and propagate trace context from WebSocket headers
+        from observability.instrumentation import use_extracted_trace_context, get_current_trace_headers
+        incoming_trace = {
+            key.lower(): value
+            for key, value in websocket.headers.items()
+            if key.lower() in {"traceparent", "tracestate", "baggage"}
+        }
+        
         # Forward events until job completes or client disconnects
         try:
-            await forward_job_events(websocket, job_id, job_realtime_bus)
+            with use_extracted_trace_context(incoming_trace):
+                await forward_job_events(websocket, job_id, job_realtime_bus)
         except Exception as e:
             logger.warning("websocket_job_progress_error", job_id=job_id, error=str(e))
         finally:

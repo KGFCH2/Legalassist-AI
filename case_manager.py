@@ -291,6 +291,10 @@ def get_user_cases_summary(user_id: int, include_closed: bool = True) -> List[Di
 
 
 def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
+    try:
+        case_id = int(case_id)
+    except (ValueError, TypeError):
+        return None
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
@@ -946,6 +950,15 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
     try:
         case = get_case_by_id(db, case_id)
         if not case or not _check_case_access(user_id, case, "update"):
+            return False
+
+        # Validate transition pathway before updating
+        current_status_str = case.status.value if hasattr(case.status, 'value') else str(case.status)
+        target_status_str = status.value if hasattr(status, 'value') else str(status)
+        if not validate_case_transition(current_status_str, target_status_str):
+            logger.warning(
+                f"Invalid case status transition from {current_status_str} to {target_status_str} (case_id={case_id})"
+            )
             return False
 
         update_case_status(db, case_id, status)
